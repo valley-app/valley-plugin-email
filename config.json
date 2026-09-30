@@ -1,0 +1,1215 @@
+{
+  "icon": "icon.svg",
+  "keepTabIcon": true,
+  "main": "runtime/index.js",
+  "indexState": "scoped",
+  "uiSlots": {
+    "left_sidebar": "email.panel",
+    "right_sidebar": "email.preview",
+    "main_workspace": "email.page"
+  },
+  "slotDefaults": {
+    "left_sidebar": {
+      "order": 50
+    },
+    "right_sidebar": {
+      "order": 80,
+      "side": "hidden"
+    }
+  },
+  "settingsView": "email.settings",
+  "searchSources": [
+    {
+      "id": "email",
+      "label": "Email",
+      "labelKey": "manifest.name",
+      "source": "dataset",
+      "dataset": "email.messages",
+      "fields": [
+        "subject",
+        "from",
+        "to",
+        "cc",
+        "text",
+        "snippet",
+        "html"
+      ],
+      "mode": "keyword",
+      "display": [
+        "subject",
+        "from",
+        "snippet"
+      ],
+      "default": false,
+      "cardKind": "email",
+      "presentation": {
+        "titleField": "subject",
+        "subtitleField": "from",
+        "snippetFields": [
+          "text",
+          "snippet",
+          "html"
+        ],
+        "snippetMode": "first",
+        "htmlFields": [
+          "html"
+        ],
+        "tagFields": [],
+        "inlineTagFields": [
+          "text",
+          "snippet",
+          "html"
+        ]
+      }
+    }
+  ],
+  "drivers": [
+    "notifications"
+  ],
+  "datasets": [
+    {
+      "id": "drafts",
+      "store": "durable",
+      "version": 1,
+      "title": "Compose drafts",
+      "titleKey": "email.draftsDataset",
+      "visibility": "private",
+      "sensitivity": "sensitive",
+      "primaryKey": [
+        "id"
+      ],
+      "columns": {
+        "id": {
+          "type": "text"
+        },
+        "draft": {
+          "type": "json"
+        },
+        "delivery": {
+          "type": "text"
+        }
+      }
+    },
+    {
+      "id": "messages",
+      "store": "cache",
+      "version": 3,
+      "title": "Messages",
+      "primaryKey": [
+        "id"
+      ],
+      "columns": {
+        "id": {
+          "type": "text"
+        },
+        "accountId": {
+          "type": "text"
+        },
+        "messageId": {
+          "type": "text"
+        },
+        "from": {
+          "type": "text"
+        },
+        "replyTo": {
+          "type": "text",
+          "nullable": true
+        },
+        "to": {
+          "type": "text"
+        },
+        "cc": {
+          "type": "text",
+          "nullable": true
+        },
+        "subject": {
+          "type": "text"
+        },
+        "date": {
+          "type": "datetime"
+        },
+        "snippet": {
+          "type": "text"
+        },
+        "text": {
+          "type": "text",
+          "nullable": true
+        },
+        "html": {
+          "type": "text",
+          "nullable": true
+        },
+        "hasAttachments": {
+          "type": "boolean"
+        },
+        "contentRevision": {
+          "type": "text",
+          "nullable": true
+        },
+        "originalDate": {
+          "type": "text",
+          "nullable": true
+        },
+        "sortDate": {
+          "type": "text",
+          "nullable": true
+        },
+        "categoryId": {
+          "type": "text",
+          "nullable": true
+        },
+        "isVip": {
+          "type": "boolean",
+          "default": false
+        },
+        "isSpam": {
+          "type": "boolean",
+          "default": false
+        },
+        "hasContact": {
+          "type": "boolean",
+          "default": false
+        },
+        "projectionVersion": {
+          "type": "integer",
+          "default": 0
+        },
+        "complete": {
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "indexes": [
+        {
+          "id": "date",
+          "columns": [
+            "date"
+          ]
+        },
+        {
+          "id": "messages_fts",
+          "columns": [
+            "subject",
+            "snippet",
+            "text"
+          ],
+          "kind": "fts5"
+        },
+        {
+          "id": "account_message",
+          "columns": [
+            "accountId",
+            "messageId"
+          ]
+        },
+        {
+          "id": "chronology",
+          "columns": [
+            "sortDate",
+            "id"
+          ]
+        },
+        {
+          "id": "account_chronology",
+          "columns": [
+            "accountId",
+            "sortDate",
+            "id"
+          ]
+        },
+        {
+          "id": "categoryId_query",
+          "columns": [
+            "accountId",
+            "categoryId",
+            "sortDate",
+            "id"
+          ]
+        },
+        {
+          "id": "isVip_query",
+          "columns": [
+            "accountId",
+            "isVip",
+            "sortDate",
+            "id"
+          ]
+        },
+        {
+          "id": "isSpam_query",
+          "columns": [
+            "accountId",
+            "isSpam",
+            "sortDate",
+            "id"
+          ]
+        },
+        {
+          "id": "hasContact_query",
+          "columns": [
+            "accountId",
+            "hasContact",
+            "sortDate",
+            "id"
+          ]
+        }
+      ],
+      "visibility": "shared",
+      "sensitivity": "sensitive",
+      "titleKey": "auto.f1702b468627"
+    },
+    {
+      "id": "mailboxes",
+      "store": "cache",
+      "version": 1,
+      "title": "Mailboxes",
+      "primaryKey": [
+        "accountId",
+        "path"
+      ],
+      "columns": {
+        "accountId": {
+          "type": "text"
+        },
+        "path": {
+          "type": "text"
+        },
+        "name": {
+          "type": "text"
+        },
+        "delimiter": {
+          "type": "text",
+          "nullable": true
+        },
+        "specialUse": {
+          "type": "text",
+          "nullable": true
+        },
+        "selectable": {
+          "type": "boolean"
+        }
+      },
+      "titleKey": "auto.f4de32abfe19"
+    },
+    {
+      "id": "folder_messages",
+      "store": "cache",
+      "version": 3,
+      "title": "Folder membership",
+      "primaryKey": [
+        "accountId",
+        "folder",
+        "uid"
+      ],
+      "columns": {
+        "accountId": {
+          "type": "text"
+        },
+        "folder": {
+          "type": "text"
+        },
+        "uid": {
+          "type": "integer"
+        },
+        "messageId": {
+          "type": "text"
+        },
+        "flags": {
+          "type": "json"
+        },
+        "unread": {
+          "type": "boolean",
+          "nullable": true
+        },
+        "flagged": {
+          "type": "boolean",
+          "nullable": true
+        },
+        "uidValidity": {
+          "type": "integer",
+          "nullable": true
+        },
+        "excluded": {
+          "type": "boolean",
+          "default": false
+        },
+        "spam": {
+          "type": "boolean",
+          "default": false
+        },
+        "projectionVersion": {
+          "type": "integer",
+          "default": 0
+        }
+      },
+      "indexes": [
+        {
+          "id": "message",
+          "columns": [
+            "accountId",
+            "messageId"
+          ]
+        },
+        {
+          "id": "folder_query",
+          "columns": [
+            "accountId",
+            "folder",
+            "uid",
+            "messageId"
+          ]
+        },
+        {
+          "id": "unread_query",
+          "columns": [
+            "accountId",
+            "unread",
+            "folder",
+            "uid",
+            "messageId"
+          ]
+        },
+        {
+          "id": "flagged_query",
+          "columns": [
+            "accountId",
+            "flagged",
+            "folder",
+            "uid",
+            "messageId"
+          ]
+        },
+        {
+          "id": "membership_lookup",
+          "columns": [
+            "messageId",
+            "accountId",
+            "folder",
+            "unread",
+            "flagged"
+          ]
+        },
+        {
+          "id": "smart_lookup",
+          "columns": [
+            "messageId",
+            "excluded",
+            "spam",
+            "unread",
+            "flagged"
+          ]
+        }
+      ],
+      "titleKey": "auto.6740906a49df"
+    },
+    {
+      "id": "recipients",
+      "store": "cache",
+      "version": 1,
+      "title": "Recipients",
+      "primaryKey": [
+        "messageId",
+        "kind",
+        "position"
+      ],
+      "columns": {
+        "messageId": {
+          "type": "text"
+        },
+        "kind": {
+          "type": "text",
+          "enum": [
+            "to",
+            "cc",
+            "bcc"
+          ]
+        },
+        "position": {
+          "type": "integer"
+        },
+        "address": {
+          "type": "text"
+        }
+      },
+      "titleKey": "auto.78cbf8eb1d8f"
+    },
+    {
+      "id": "attachments",
+      "store": "cache",
+      "version": 1,
+      "title": "Attachment metadata",
+      "primaryKey": [
+        "messageId",
+        "position"
+      ],
+      "columns": {
+        "messageId": {
+          "type": "text"
+        },
+        "position": {
+          "type": "integer"
+        },
+        "filename": {
+          "type": "text"
+        },
+        "contentType": {
+          "type": "text",
+          "nullable": true
+        },
+        "size": {
+          "type": "integer",
+          "nullable": true
+        },
+        "filePath": {
+          "type": "text",
+          "nullable": true
+        }
+      },
+      "titleKey": "auto.3553cb747ca8"
+    },
+    {
+      "id": "sync_state",
+      "store": "cache",
+      "version": 1,
+      "title": "Mail sync state",
+      "primaryKey": [
+        "accountId",
+        "folder"
+      ],
+      "columns": {
+        "accountId": {
+          "type": "text"
+        },
+        "folder": {
+          "type": "text"
+        },
+        "uidValidity": {
+          "type": "integer",
+          "nullable": true
+        },
+        "cursor": {
+          "type": "text",
+          "nullable": true
+        },
+        "lastSyncAt": {
+          "type": "datetime",
+          "nullable": true
+        }
+      },
+      "titleKey": "auto.77ccbffa13b7"
+    },
+    {
+      "id": "assignments",
+      "store": "durable",
+      "version": 1,
+      "title": "Email category assignments",
+      "visibility": "private",
+      "sensitivity": "sensitive",
+      "primaryKey": [
+        "id"
+      ],
+      "columns": {
+        "id": {
+          "type": "text"
+        },
+        "categoryId": {
+          "type": "text",
+          "nullable": true
+        },
+        "manual": {
+          "type": "boolean",
+          "default": false
+        },
+        "contentRevision": {
+          "type": "text",
+          "nullable": true
+        },
+        "configurationRevision": {
+          "type": "text",
+          "nullable": true
+        },
+        "revision": {
+          "type": "integer",
+          "default": 0
+        }
+      },
+      "indexes": [],
+      "titleKey": "email.dataset.assignments"
+    },
+    {
+      "id": "classification_jobs",
+      "store": "durable",
+      "version": 1,
+      "title": "Email classification progress",
+      "visibility": "private",
+      "sensitivity": "sensitive",
+      "primaryKey": [
+        "id"
+      ],
+      "columns": {
+        "id": {
+          "type": "text"
+        },
+        "messageId": {
+          "type": "text",
+          "nullable": true
+        },
+        "accountId": {
+          "type": "text",
+          "nullable": true
+        },
+        "contentRevision": {
+          "type": "text",
+          "nullable": true
+        },
+        "configurationRevision": {
+          "type": "text",
+          "nullable": true
+        },
+        "status": {
+          "type": "text",
+          "default": "queued"
+        },
+        "automatic": {
+          "type": "boolean",
+          "default": false
+        },
+        "createdAt": {
+          "type": "datetime",
+          "nullable": true
+        },
+        "requestId": {
+          "type": "text",
+          "nullable": true
+        },
+        "error": {
+          "type": "text",
+          "nullable": true
+        },
+        "startedAt": {
+          "type": "datetime",
+          "nullable": true
+        }
+      },
+      "indexes": [
+        {
+          "id": "queue",
+          "columns": [
+            "status",
+            "createdAt"
+          ]
+        },
+        {
+          "id": "allowance",
+          "columns": [
+            "accountId",
+            "automatic",
+            "createdAt"
+          ]
+        }
+      ],
+      "titleKey": "email.dataset.classification_jobs"
+    }
+  ],
+  "storageInventory": [
+    {
+      "id": "attachment-files",
+      "kind": "attachments",
+      "store": "cache"
+    }
+  ],
+  "provides": [
+    {
+      "id": "search.resultAction",
+      "kind": "extension",
+      "version": "1.0.0"
+    },
+    {
+      "id": "agent.toolProvider",
+      "kind": "service",
+      "version": "1.0.0"
+    },
+    {
+      "id": "metadataPanel.segment",
+      "kind": "extension",
+      "version": "1.0.0"
+    },
+    {
+      "id": "workspace.surface",
+      "kind": "extension",
+      "version": "1.0.0"
+    },
+    {
+      "id": "workspace.bookmark",
+      "kind": "service",
+      "version": "1.0.0"
+    }
+  ],
+  "guardPresets": {
+    "schemaVersion": 1,
+    "defaultPreset": "recommended",
+    "presets": [
+      {
+        "id": "recommended",
+        "label": "Recommended",
+        "version": 1,
+        "description": "Reading the inbox asks first; sending always confirms.",
+        "entries": {
+          "commands": {
+            "compose": {
+              "decision": "confirm",
+              "allowPreApproval": false
+            },
+            "sync": {
+              "decision": "allow"
+            },
+            "open-mailbox": {
+              "decision": "allow"
+            }
+          },
+          "tools": {
+            "list_mail_accounts": {
+              "decision": "allow"
+            },
+            "list_mail_folders": {
+              "decision": "allow"
+            },
+            "read_inbox": {
+              "decision": "confirm",
+              "allowPreApproval": false
+            },
+            "search_email_messages": {
+              "decision": "confirm",
+              "allowPreApproval": false
+            },
+            "read_mail_message": {
+              "decision": "confirm",
+              "allowPreApproval": false
+            },
+            "update_email_message": {
+              "decision": "confirm",
+              "allowPreApproval": false
+            },
+            "compose_email": {
+              "decision": "confirm",
+              "allowPreApproval": false
+            },
+            "reply_to_email": {
+              "decision": "confirm",
+              "allowPreApproval": false
+            },
+            "forward_email": {
+              "decision": "confirm",
+              "allowPreApproval": false
+            }
+          }
+        }
+      },
+      {
+        "id": "read-only",
+        "label": "Read-only",
+        "version": 1,
+        "description": "Read mail; never send.",
+        "entries": {
+          "commands": {
+            "compose": {
+              "decision": "deny"
+            }
+          },
+          "tools": {
+            "list_mail_accounts": {
+              "decision": "allow"
+            },
+            "list_mail_folders": {
+              "decision": "allow"
+            },
+            "read_inbox": {
+              "decision": "allow"
+            },
+            "search_email_messages": {
+              "decision": "allow"
+            },
+            "read_mail_message": {
+              "decision": "allow"
+            },
+            "update_email_message": {
+              "decision": "deny"
+            },
+            "compose_email": {
+              "decision": "deny"
+            },
+            "reply_to_email": {
+              "decision": "deny"
+            },
+            "forward_email": {
+              "decision": "deny"
+            }
+          }
+        }
+      },
+      {
+        "id": "blocked",
+        "label": "Blocked",
+        "version": 1,
+        "description": "No email actions at all.",
+        "entries": {
+          "commands": {
+            "compose": {
+              "decision": "deny"
+            },
+            "sync": {
+              "decision": "deny"
+            },
+            "open-mailbox": {
+              "decision": "deny"
+            }
+          },
+          "tools": {
+            "list_mail_accounts": {
+              "decision": "deny"
+            },
+            "list_mail_folders": {
+              "decision": "deny"
+            },
+            "read_inbox": {
+              "decision": "deny"
+            },
+            "search_email_messages": {
+              "decision": "deny"
+            },
+            "read_mail_message": {
+              "decision": "deny"
+            },
+            "update_email_message": {
+              "decision": "deny"
+            },
+            "compose_email": {
+              "decision": "deny"
+            },
+            "reply_to_email": {
+              "decision": "deny"
+            },
+            "forward_email": {
+              "decision": "deny"
+            }
+          }
+        }
+      }
+    ]
+  },
+  "settingsSchema": {
+    "fields": [
+      {
+        "key": "syncLimit",
+        "label": "Messages per sync",
+        "labelKey": "plugin.email.field.perSync",
+        "type": "number",
+        "default": 50,
+        "description": "How many recent messages to fetch from a folder on each sync (max 500).",
+        "descriptionKey": "auto.62e474963a01"
+      }
+    ]
+  },
+  "consumes": [
+    {
+      "id": "contacts.directory",
+      "kind": "service",
+      "range": "^1.0.0",
+      "optional": true
+    },
+    {
+      "id": "contacts.directoryRevision",
+      "kind": "state",
+      "range": "^1.0.0",
+      "optional": true
+    }
+  ],
+  "locales": {
+    "en": "runtime/locales/en.json",
+    "de": "runtime/locales/de.json",
+    "es": "runtime/locales/es.json",
+    "fr": "runtime/locales/fr.json",
+    "zh-CN": "runtime/locales/zh-CN.json"
+  },
+  "runtime": {
+    "ui": "runtime/index.js",
+    "backend": "runtime/backend.js",
+    "activation": {
+      "backend": [
+        "background",
+        "capability"
+      ]
+    }
+  },
+  "permissions": {
+    "network": {
+      "hosts": [
+        "imap.gmail.com",
+        "smtp.gmail.com",
+        "outlook.office365.com",
+        "smtp.office365.com"
+      ],
+      "allowUserEndpoints": true
+    },
+    "accounts": [
+      "mail"
+    ],
+    "credentials": true,
+    "ai": [
+      "discovery",
+      "classification"
+    ]
+  },
+  "datasetMigrations": [
+    {
+      "id": "membership-flag-projection-v2",
+      "store": "cache",
+      "fromVersion": 1,
+      "toVersion": 2,
+      "steps": [
+        {
+          "operation": "add-column",
+          "dataset": "folder_messages",
+          "column": "unread",
+          "definition": {
+            "type": "boolean",
+            "nullable": true
+          }
+        },
+        {
+          "operation": "add-column",
+          "dataset": "folder_messages",
+          "column": "flagged",
+          "definition": {
+            "type": "boolean",
+            "nullable": true
+          }
+        },
+        {
+          "operation": "create-index",
+          "dataset": "folder_messages",
+          "index": {
+            "id": "folder_query",
+            "columns": [
+              "accountId",
+              "folder",
+              "uid",
+              "messageId"
+            ]
+          }
+        },
+        {
+          "operation": "create-index",
+          "dataset": "folder_messages",
+          "index": {
+            "id": "unread_query",
+            "columns": [
+              "accountId",
+              "unread",
+              "folder",
+              "uid",
+              "messageId"
+            ]
+          }
+        },
+        {
+          "operation": "create-index",
+          "dataset": "folder_messages",
+          "index": {
+            "id": "flagged_query",
+            "columns": [
+              "accountId",
+              "flagged",
+              "folder",
+              "uid",
+              "messageId"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "messages-identity-projections-v3",
+      "store": "cache",
+      "fromVersion": 1,
+      "toVersion": 3,
+      "steps": [
+        {
+          "operation": "add-column",
+          "dataset": "messages",
+          "column": "contentRevision",
+          "definition": {
+            "type": "text",
+            "nullable": true
+          }
+        },
+        {
+          "operation": "add-column",
+          "dataset": "messages",
+          "column": "originalDate",
+          "definition": {
+            "type": "text",
+            "nullable": true
+          }
+        },
+        {
+          "operation": "add-column",
+          "dataset": "messages",
+          "column": "sortDate",
+          "definition": {
+            "type": "text",
+            "nullable": true
+          }
+        },
+        {
+          "operation": "add-column",
+          "dataset": "messages",
+          "column": "categoryId",
+          "definition": {
+            "type": "text",
+            "nullable": true
+          }
+        },
+        {
+          "operation": "add-column",
+          "dataset": "messages",
+          "column": "isVip",
+          "definition": {
+            "type": "boolean",
+            "default": false
+          }
+        },
+        {
+          "operation": "add-column",
+          "dataset": "messages",
+          "column": "isSpam",
+          "definition": {
+            "type": "boolean",
+            "default": false
+          }
+        },
+        {
+          "operation": "add-column",
+          "dataset": "messages",
+          "column": "hasContact",
+          "definition": {
+            "type": "boolean",
+            "default": false
+          }
+        },
+        {
+          "operation": "add-column",
+          "dataset": "messages",
+          "column": "projectionVersion",
+          "definition": {
+            "type": "integer",
+            "default": 0
+          }
+        },
+        {
+          "operation": "drop-index",
+          "dataset": "messages",
+          "index": "account_message"
+        },
+        {
+          "operation": "create-index",
+          "dataset": "messages",
+          "index": {
+            "id": "account_message",
+            "columns": [
+              "accountId",
+              "messageId"
+            ]
+          }
+        },
+        {
+          "operation": "create-index",
+          "dataset": "messages",
+          "index": {
+            "id": "chronology",
+            "columns": [
+              "sortDate",
+              "id"
+            ]
+          }
+        },
+        {
+          "operation": "create-index",
+          "dataset": "messages",
+          "index": {
+            "id": "account_chronology",
+            "columns": [
+              "accountId",
+              "sortDate",
+              "id"
+            ]
+          }
+        },
+        {
+          "operation": "create-index",
+          "dataset": "messages",
+          "index": {
+            "id": "categoryId_query",
+            "columns": [
+              "accountId",
+              "categoryId",
+              "sortDate",
+              "id"
+            ]
+          }
+        },
+        {
+          "operation": "create-index",
+          "dataset": "messages",
+          "index": {
+            "id": "isVip_query",
+            "columns": [
+              "accountId",
+              "isVip",
+              "sortDate",
+              "id"
+            ]
+          }
+        },
+        {
+          "operation": "create-index",
+          "dataset": "messages",
+          "index": {
+            "id": "isSpam_query",
+            "columns": [
+              "accountId",
+              "isSpam",
+              "sortDate",
+              "id"
+            ]
+          }
+        },
+        {
+          "operation": "create-index",
+          "dataset": "messages",
+          "index": {
+            "id": "hasContact_query",
+            "columns": [
+              "accountId",
+              "hasContact",
+              "sortDate",
+              "id"
+            ]
+          }
+        },
+        {
+          "operation": "add-column",
+          "dataset": "messages",
+          "column": "complete",
+          "definition": {
+            "type": "boolean",
+            "default": false
+          }
+        }
+      ]
+    },
+    {
+      "id": "folder_messages-identity-projections-v3",
+      "store": "cache",
+      "fromVersion": 2,
+      "toVersion": 3,
+      "steps": [
+        {
+          "operation": "add-column",
+          "dataset": "folder_messages",
+          "column": "uidValidity",
+          "definition": {
+            "type": "integer",
+            "nullable": true
+          }
+        },
+        {
+          "operation": "add-column",
+          "dataset": "folder_messages",
+          "column": "excluded",
+          "definition": {
+            "type": "boolean",
+            "default": false
+          }
+        },
+        {
+          "operation": "add-column",
+          "dataset": "folder_messages",
+          "column": "spam",
+          "definition": {
+            "type": "boolean",
+            "default": false
+          }
+        },
+        {
+          "operation": "create-index",
+          "dataset": "folder_messages",
+          "index": {
+            "id": "membership_lookup",
+            "columns": [
+              "messageId",
+              "accountId",
+              "folder",
+              "unread",
+              "flagged"
+            ]
+          }
+        },
+        {
+          "operation": "create-index",
+          "dataset": "folder_messages",
+          "index": {
+            "id": "smart_lookup",
+            "columns": [
+              "messageId",
+              "excluded",
+              "spam",
+              "unread",
+              "flagged"
+            ]
+          }
+        },
+        {
+          "operation": "add-column",
+          "dataset": "folder_messages",
+          "column": "projectionVersion",
+          "definition": {
+            "type": "integer",
+            "default": 0
+          }
+        }
+      ]
+    }
+  ],
+  "notifications": [
+    {
+      "id": "newMail",
+      "label": "New mail",
+      "labelKey": "notification.newMail",
+      "defaultChannel": "automatic",
+      "actions": [
+        "open",
+        "read",
+        "reply"
+      ]
+    },
+    {
+      "id": "sendFailed",
+      "label": "Send failed",
+      "labelKey": "notification.sendFailed",
+      "defaultChannel": "automatic",
+      "actions": [
+        "open"
+      ]
+    },
+    {
+      "id": "syncFailed",
+      "label": "Persistent sync failure",
+      "labelKey": "notification.syncFailed",
+      "defaultChannel": "automatic",
+      "actions": [
+        "open"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,130 @@
+import { t } from './localization'
+import { decodeText, encodeText } from './encoding'
+import { addressParser } from 'postal-mime'
+import type { EmailAddress, EmailMessageDetail, EmailMessageQuery, EmailMessageRef, EmailMessageSummary } from '../mailTypes'
+import type { DatasetPage, DatasetRecord, DatasetWhere } from '@valley/plugin-sdk/datasets'
+import { datasetRequest as request, ensureMembershipFlags, folderProjection, projectAssignments, queryAll, type EmailStoreContext } from './cache'
+
+export function parseEmailAddresses(value: string, strict = false): EmailAddress[] {
+  const parsed = addressParser(value, { flatten: true })
+  if (strict && parsed.some((entry) => !/^[^\s@<>]+@[^\s@<>]+$/.test(entry.address ?? ''))) throw new Error(t('email.backend.address'))
+  return parsed.filter((entry) => /^[^\s@<>]+@[^\s@<>]+$/.test((entry.address ?? '')))
+    .map((entry) => ({ name: entry.name || '', address: entry.address!.trim() }))
+}
+
+function flags(row: DatasetRecord): string[] {
+  return Array.isArray(row.flags) ? row.flags.filter((flag): flag is string => typeof flag === 'string') : []
+}
+
+function summarize(row: DatasetRecord, memberships: DatasetRecord[]): EmailMessageSummary {
+  const primary = memberships[0]
+  const text = (key: string): string => typeof row[key] === 'string' ? row[key] as string : ''
+  return {
+    id: text('id'), accountId: text('accountId'), folder: String(primary.folder), uid: Number(primary.uid), ...(typeof primary.uidValidity === 'number' ? { uidValidity: primary.uidValidity } : {}),
+    memberships: memberships.map((item) => ({ accountId: text('accountId'), folder: String(item.folder), uid: Number(item.uid), ...(typeof item.uidValidity === 'number' ? { uidValidity: item.uidValidity } : {}) })),
+    messageId: text('messageId'), from: text('from'), to: text('to'), cc: text('cc'), replyTo: text('replyTo'),
+    ...(typeof row.categoryId === 'string' ? { categoryId: row.categoryId } : {}), isVip: row.isVip === true, isSpam: row.isSpam === true, hasContact: row.hasContact === true,
+    ...(typeof row.contentRevision === 'string' ? { contentRevision: row.contentRevision } : {}),
+    subject: text('subject'), date: typeof row.sortDate === 'string' ? row.sortDate : text('date'), snippet: text('snippet'), hasAttachments: row.hasAttachments === true,
+    flags: flags(primary),
+    addresses: { from: parseEmailAddresses(text('from')), to: parseEmailAddresses(text('to')),
+      cc: parseEmailAddresses(text('cc')), replyTo: parseEmailAddresses(text('replyTo')) }
+  }
+}
+
+export async function ensureQueryProjections(scope: EmailStoreContext, accountIds: string[]): Promise<void> {
+  for (const accountId of accountIds) {
+    await ensureMembershipFlags(scope, accountId)
+    let conflicts = 0
+    for (;;) {
+      const page = await scope.data.dataset(scope.datasets.messages).query({ where: { accountId, projectionVersion: 0 }, select: ['id', 'date'], limit: 500 })
+      if (!page.rows.length) break
+      const spam = await scope.data.dataset(scope.datasets.folderMessages).aggregate({ where: { accountId, messageId: { in: page.rows.map(row => String(row.id)) }, spam: true }, groupBy: ['messageId'], metrics: { count: { operation: 'count' } } })
+      try {
+        await scope.data.transaction(page.rows.map(row => ({ dataset: scope.datasets.messages, operation: 'update', key: { id: String(row.id) }, values: { sortDate: row.date, isSpam: spam.some(member => member.messageId === row.id), projectionVersion: 1 } })), { expected: [{ dataset: scope.datasets.messages, revision: page.revision }] })
+        conflicts = 0
+      } catch (reason) { if ((reason as { code?: string }).code !== 'conflict' || ++conflicts >= 3) throw reason }
+    }
+  }
+}
+
+export async function queryMessages(scope: EmailStoreContext, input: EmailMessageQuery): Promise<{ messages: EmailMessageSummary[]; cursor?: string; total: number }> {
+  const accountIds = [...new Set((input.accountIds?.length ? input.accountIds : [input.accountId]).filter(Boolean))].sort()
+  if (!accountIds.length) return { messages: [], total: 0 }
+  await ensureQueryProjections(scope, accountIds)
+  const filters = input.filters ?? {}
+  const membership: DatasetWhere = {}
+  if (input.view === 'folder') membership.folder = input.folder
+  else if (filters.spam === 'spam') membership.spam = true
+  else if (filters.spam === 'all') membership.or = [{ excluded: false }, { spam: true }]
+  else membership.excluded = false
+  if (input.view === 'unread' || input.view === 'flagged') membership[input.view] = true
+  const conditions: DatasetWhere[] = [
+    { accountId: { in: accountIds } },
+    { exists: { dataset: scope.datasets.folderMessages, on: { id: 'messageId', accountId: 'accountId' }, where: membership } }
+  ]
+  if (filters.contact && filters.contact !== 'all') conditions.push({ hasContact: filters.contact === 'known' })
+  if (filters.vip && filters.vip !== 'all') conditions.push({ isVip: filters.vip === 'vip' })
+  if (filters.spam === 'spam' || filters.spam === 'not-spam') conditions.push({ isSpam: filters.spam === 'spam' })
+  if (filters.categoryId) conditions.push({ categoryId: filters.categoryId === 'uncategorized' ? { isNull: true } : filters.categoryId })
+  if (input.query?.trim()) conditions.push({ or: ['from', 'to', 'cc', 'subject', 'snippet', 'text', 'html'].map(field => ({ [field]: { contains: input.query!.trim() } })) })
+  const stamp = await scope.data.snapshot([
+    { operation: 'query', dataset: scope.datasets.messages, query: { select: ['id'], limit: 1 } },
+    { operation: 'query', dataset: scope.datasets.folderMessages, query: { select: ['uid'], limit: 1 } }
+  ])
+  const cursorScope = JSON.stringify([accountIds, input.view, input.folder ?? '', input.query ?? '', filters, stamp.values.map(value => (value as DatasetPage).revision)])
+  let after: string | undefined
+  if (input.cursor) {
+    let cursor: { scope: string; after: string }
+    try { cursor = JSON.parse(decodeText(input.cursor)) } catch { throw new Error(t('email.backend.cursor')) }
+    if (cursor.scope !== cursorScope || typeof cursor.after !== 'string') throw new Error(t('email.backend.cursor'))
+    after = cursor.after
+  }
+  const where = { and: conditions }
+  const page = await scope.data.dataset(scope.datasets.messages).query({
+    select: ['id', 'accountId', 'messageId', 'from', 'to', 'cc', 'replyTo', 'subject', 'date', 'sortDate', 'snippet', 'hasAttachments', 'categoryId', 'isVip', 'isSpam', 'hasContact', 'contentRevision'],
+    where, orderBy: [{ field: 'sortDate', direction: 'desc' }, { field: 'id', direction: 'desc' }], limit: input.limit ?? 100, cursor: after
+  })
+  const members: DatasetRecord[] = []
+  for (let index = 0; index < page.rows.length; index += 100) members.push(...await queryAll(scope, scope.datasets.folderMessages, { messageId: { in: page.rows.slice(index, index + 100).map(row => String(row.id)) } }))
+  const matching = (row: DatasetRecord) => (input.view === 'folder' ? row.folder === input.folder : filters.spam === 'spam' ? row.spam === true : filters.spam === 'all' ? !row.excluded || row.spam === true : !row.excluded) && (input.view === 'unread' ? row.unread : input.view === 'flagged' ? row.flagged : true)
+  const messages = page.rows.flatMap(row => {
+    const locations = members.filter(member => member.messageId === row.id && member.accountId === row.accountId)
+    locations.sort((a, b) => Number(Boolean(matching(b))) - Number(Boolean(matching(a))) || Number(String(b.folder).toUpperCase() === 'INBOX') - Number(String(a.folder).toUpperCase() === 'INBOX') || String(a.folder).localeCompare(String(b.folder)))
+    return locations.length ? [summarize(row, locations)] : []
+  })
+  return { messages, total: await scope.data.dataset(scope.datasets.messages).count(where), ...(page.cursor ? { cursor: encodeText(JSON.stringify({ scope: cursorScope, after: page.cursor })) } : {}) }
+}
+
+export async function readMessage(scope: EmailStoreContext, ref: EmailMessageRef): Promise<EmailMessageDetail | null> {
+  const membership = await request<DatasetRecord | null>(scope, { operation: 'get', dataset: scope.datasets.folderMessages, key: { accountId: ref.accountId, folder: ref.folder, uid: ref.uid } })
+  if (!membership || ref.uidValidity !== undefined && membership.uidValidity !== ref.uidValidity) return null
+  const row = await request<DatasetRecord | null>(scope, { operation: 'get', dataset: scope.datasets.messages, key: { id: String(membership.messageId) } })
+  if (!row) return null
+  const memberships = await queryAll(scope, scope.datasets.folderMessages, { accountId: ref.accountId, messageId: String(membership.messageId) })
+  const others = memberships.filter((entry) => entry.folder !== ref.folder || entry.uid !== ref.uid)
+  return { ...summarize(row, [membership, ...others]), ...(typeof row.text === 'string' ? { text: row.text } : {}), ...(typeof row.html === 'string' ? { html: row.html } : {}) }
+}
+
+export async function cacheMailboxes(scope: EmailStoreContext, accountId: string, mailboxes: { path: string; name: string; specialUse?: string; delimiter?: string; selectable: boolean }[]): Promise<void> {
+  if (!mailboxes.length) return
+  await request(scope, { operation: 'transaction', operations: mailboxes.map((mailbox) => ({
+    operation: 'upsert', dataset: scope.datasets.mailboxes, values: {
+      accountId, path: mailbox.path, name: mailbox.name, selectable: mailbox.selectable,
+      specialUse: mailbox.specialUse ?? null, delimiter: mailbox.delimiter ?? null
+    }
+  })) })
+  for (const mailbox of mailboxes) {
+    let cursor: string | undefined
+    do {
+      const page = await scope.data.dataset(scope.datasets.folderMessages).query({ where: { accountId, folder: mailbox.path }, select: ['uid', 'messageId', 'flags'], limit: 500, cursor })
+      if (page.rows.length) await scope.data.transaction(page.rows.map(row => ({ operation: 'update', dataset: scope.datasets.folderMessages, key: { accountId, folder: mailbox.path, uid: Number(row.uid) }, values: folderProjection(mailbox.path, mailbox.specialUse, Array.isArray(row.flags) ? row.flags as string[] : []) })))
+      if (page.rows.length) await projectAssignments(scope, [...new Set(page.rows.map(row => String(row.messageId)))])
+      cursor = page.cursor
+    } while (cursor)
+  }
+}
+
+export async function cachedMailboxes(scope: EmailStoreContext, accountId: string): Promise<DatasetRecord[]> {
+  return queryAll(scope, scope.datasets.mailboxes, { accountId })
+}
