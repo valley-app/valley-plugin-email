@@ -806,7 +806,85 @@
         "type": "number",
         "default": 50,
         "description": "How many recent messages to fetch from a folder on each sync (max 500).",
-        "descriptionKey": "auto.62e474963a01"
+        "descriptionKey": "auto.62e474963a01",
+        "schema": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 500
+        }
+      },
+      {
+        "key": "vipAddresses",
+        "label": "VIP addresses",
+        "type": "custom",
+        "settingsVisible": false,
+        "schema": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "default": []
+      },
+      {
+        "key": "grouping",
+        "label": "Message classification",
+        "type": "custom",
+        "settingsVisible": false,
+        "schema": {
+          "type": "object",
+          "properties": {
+            "automatic": {
+              "type": "boolean"
+            },
+            "dailyLimit": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 10000
+            },
+            "categories": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              }
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      {
+        "key": "accountDisplay:*",
+        "label": "Account message display",
+        "type": "custom",
+        "settingsVisible": false,
+        "schema": {
+          "type": "object",
+          "properties": {
+            "htmlContent": {
+              "type": "boolean"
+            },
+            "remoteImages": {
+              "type": "boolean"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "htmlContent",
+            "remoteImages"
+          ]
+        },
+        "keyPrefix": "accountDisplay:"
+      },
+      {
+        "key": "filters",
+        "label": "Message filters",
+        "type": "custom",
+        "settingsVisible": false,
+        "schema": {
+          "type": "object"
+        },
+        "readOnly": true,
+        "description": "Owner-managed runtime state; change it through the owning domain operation."
       }
     ]
   },
@@ -839,7 +917,1788 @@
         "background",
         "capability"
       ]
-    }
+    },
+    "services": [
+      {
+        "id": "command.listAccounts",
+        "version": "1.0.0",
+        "method": "command.listAccounts",
+        "operation": true,
+        "request": {
+          "type": "unknown"
+        },
+        "response": {
+          "type": "unknown"
+        },
+        "metadata": {
+          "command": {
+            "id": "listAccounts",
+            "description": "List configured mail accounts and connection status",
+            "effect": "read",
+            "inputSchema": {
+              "type": "object",
+              "properties": {},
+              "required": [],
+              "additionalProperties": false
+            },
+            "result": "driver",
+            "outputSchema": {
+              "type": "object",
+              "properties": {
+                "accounts": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "id": {
+                        "type": "string"
+                      },
+                      "provider": {
+                        "type": "string"
+                      },
+                      "address": {
+                        "type": "string"
+                      },
+                      "displayName": {
+                        "type": "string"
+                      },
+                      "imap": {
+                        "type": "object",
+                        "properties": {
+                          "host": {
+                            "type": "string"
+                          },
+                          "port": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 65535
+                          },
+                          "secure": {
+                            "type": "boolean"
+                          }
+                        },
+                        "required": [
+                          "host",
+                          "port",
+                          "secure"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "smtp": {
+                        "type": "object",
+                        "properties": {
+                          "host": {
+                            "type": "string"
+                          },
+                          "port": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 65535
+                          },
+                          "secure": {
+                            "type": "boolean"
+                          }
+                        },
+                        "required": [
+                          "host",
+                          "port",
+                          "secure"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "createdAt": {
+                        "type": "number"
+                      },
+                      "secretState": {
+                        "enum": [
+                          "absent",
+                          "ok",
+                          "unreadable"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "id",
+                      "provider",
+                      "address",
+                      "imap",
+                      "smtp",
+                      "createdAt"
+                    ],
+                    "additionalProperties": false
+                  }
+                }
+              },
+              "required": [
+                "accounts"
+              ],
+              "additionalProperties": false
+            }
+          }
+        }
+      },
+      {
+        "id": "command.addSmtpAccount",
+        "version": "1.0.0",
+        "method": "command.addSmtpAccount",
+        "operation": true,
+        "request": {
+          "type": "unknown"
+        },
+        "response": {
+          "type": "unknown"
+        },
+        "metadata": {
+          "command": {
+            "id": "addSmtpAccount",
+            "description": "Create and verify a protected SMTP/IMAP account",
+            "effect": "execute",
+            "inputSchema": {
+              "type": "object",
+              "properties": {
+                "address": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096
+                },
+                "displayName": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096
+                },
+                "password": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 16384
+                },
+                "imap": {
+                  "type": "object",
+                  "properties": {
+                    "host": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 4096
+                    },
+                    "port": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 65535
+                    },
+                    "secure": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "host",
+                    "port",
+                    "secure"
+                  ],
+                  "additionalProperties": false
+                },
+                "smtp": {
+                  "type": "object",
+                  "properties": {
+                    "host": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 4096
+                    },
+                    "port": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 65535
+                    },
+                    "secure": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "host",
+                    "port",
+                    "secure"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "address",
+                "password",
+                "imap",
+                "smtp"
+              ],
+              "additionalProperties": false
+            },
+            "result": "driver",
+            "sensitive": true,
+            "outputSchema": {
+              "type": "object",
+              "properties": {
+                "account": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "provider": {
+                      "type": "string"
+                    },
+                    "address": {
+                      "type": "string"
+                    },
+                    "displayName": {
+                      "type": "string"
+                    },
+                    "imap": {
+                      "type": "object",
+                      "properties": {
+                        "host": {
+                          "type": "string"
+                        },
+                        "port": {
+                          "type": "integer",
+                          "minimum": 1,
+                          "maximum": 65535
+                        },
+                        "secure": {
+                          "type": "boolean"
+                        }
+                      },
+                      "required": [
+                        "host",
+                        "port",
+                        "secure"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "smtp": {
+                      "type": "object",
+                      "properties": {
+                        "host": {
+                          "type": "string"
+                        },
+                        "port": {
+                          "type": "integer",
+                          "minimum": 1,
+                          "maximum": 65535
+                        },
+                        "secure": {
+                          "type": "boolean"
+                        }
+                      },
+                      "required": [
+                        "host",
+                        "port",
+                        "secure"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "createdAt": {
+                      "type": "number"
+                    },
+                    "secretState": {
+                      "enum": [
+                        "absent",
+                        "ok",
+                        "unreadable"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "provider",
+                    "address",
+                    "imap",
+                    "smtp",
+                    "createdAt"
+                  ],
+                  "additionalProperties": false
+                },
+                "accounts": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "id": {
+                        "type": "string"
+                      },
+                      "provider": {
+                        "type": "string"
+                      },
+                      "address": {
+                        "type": "string"
+                      },
+                      "displayName": {
+                        "type": "string"
+                      },
+                      "imap": {
+                        "type": "object",
+                        "properties": {
+                          "host": {
+                            "type": "string"
+                          },
+                          "port": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 65535
+                          },
+                          "secure": {
+                            "type": "boolean"
+                          }
+                        },
+                        "required": [
+                          "host",
+                          "port",
+                          "secure"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "smtp": {
+                        "type": "object",
+                        "properties": {
+                          "host": {
+                            "type": "string"
+                          },
+                          "port": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 65535
+                          },
+                          "secure": {
+                            "type": "boolean"
+                          }
+                        },
+                        "required": [
+                          "host",
+                          "port",
+                          "secure"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "createdAt": {
+                        "type": "number"
+                      },
+                      "secretState": {
+                        "enum": [
+                          "absent",
+                          "ok",
+                          "unreadable"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "id",
+                      "provider",
+                      "address",
+                      "imap",
+                      "smtp",
+                      "createdAt"
+                    ],
+                    "additionalProperties": false
+                  }
+                }
+              },
+              "required": [
+                "account",
+                "accounts"
+              ],
+              "additionalProperties": false
+            }
+          }
+        }
+      },
+      {
+        "id": "command.removeAccount",
+        "version": "1.0.0",
+        "method": "command.removeAccount",
+        "operation": true,
+        "request": {
+          "type": "unknown"
+        },
+        "response": {
+          "type": "unknown"
+        },
+        "metadata": {
+          "command": {
+            "id": "removeAccount",
+            "description": "Remove a local mail account and its cached messages",
+            "effect": "write",
+            "inputSchema": {
+              "type": "object",
+              "properties": {
+                "accountId": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096
+                }
+              },
+              "required": [
+                "accountId"
+              ],
+              "additionalProperties": false
+            },
+            "result": "driver",
+            "outputSchema": {
+              "type": "object",
+              "properties": {
+                "accounts": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "id": {
+                        "type": "string"
+                      },
+                      "provider": {
+                        "type": "string"
+                      },
+                      "address": {
+                        "type": "string"
+                      },
+                      "displayName": {
+                        "type": "string"
+                      },
+                      "imap": {
+                        "type": "object",
+                        "properties": {
+                          "host": {
+                            "type": "string"
+                          },
+                          "port": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 65535
+                          },
+                          "secure": {
+                            "type": "boolean"
+                          }
+                        },
+                        "required": [
+                          "host",
+                          "port",
+                          "secure"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "smtp": {
+                        "type": "object",
+                        "properties": {
+                          "host": {
+                            "type": "string"
+                          },
+                          "port": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 65535
+                          },
+                          "secure": {
+                            "type": "boolean"
+                          }
+                        },
+                        "required": [
+                          "host",
+                          "port",
+                          "secure"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "createdAt": {
+                        "type": "number"
+                      },
+                      "secretState": {
+                        "enum": [
+                          "absent",
+                          "ok",
+                          "unreadable"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "id",
+                      "provider",
+                      "address",
+                      "imap",
+                      "smtp",
+                      "createdAt"
+                    ],
+                    "additionalProperties": false
+                  }
+                }
+              },
+              "required": [
+                "accounts"
+              ],
+              "additionalProperties": false
+            }
+          }
+        }
+      },
+      {
+        "id": "command.listFolders",
+        "version": "1.0.0",
+        "method": "command.listFolders",
+        "operation": true,
+        "request": {
+          "type": "unknown"
+        },
+        "response": {
+          "type": "unknown"
+        },
+        "metadata": {
+          "command": {
+            "id": "listFolders",
+            "description": "List and refresh mailbox names and cached counts",
+            "effect": "write",
+            "inputSchema": {
+              "type": "object",
+              "properties": {
+                "accountId": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096
+                }
+              },
+              "required": [
+                "accountId"
+              ],
+              "additionalProperties": false
+            },
+            "result": "driver",
+            "outputSchema": {
+              "type": "object",
+              "properties": {
+                "folders": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "mailboxes": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "path": {
+                        "type": "string"
+                      },
+                      "name": {
+                        "type": "string"
+                      },
+                      "delimiter": {
+                        "type": "string"
+                      },
+                      "specialUse": {
+                        "type": "string"
+                      },
+                      "selectable": {
+                        "type": "boolean"
+                      },
+                      "cachedTotal": {
+                        "type": "integer"
+                      },
+                      "cachedUnread": {
+                        "type": "integer"
+                      }
+                    },
+                    "required": [
+                      "path",
+                      "name",
+                      "selectable",
+                      "cachedTotal",
+                      "cachedUnread"
+                    ],
+                    "additionalProperties": false
+                  }
+                }
+              },
+              "required": [
+                "folders",
+                "mailboxes"
+              ],
+              "additionalProperties": false
+            }
+          }
+        }
+      },
+      {
+        "id": "command.syncFolder",
+        "version": "1.0.0",
+        "method": "command.syncFolder",
+        "operation": true,
+        "request": {
+          "type": "unknown"
+        },
+        "response": {
+          "type": "unknown"
+        },
+        "metadata": {
+          "command": {
+            "id": "syncFolder",
+            "description": "Synchronize an account folder and update the local message cache",
+            "effect": "execute",
+            "inputSchema": {
+              "type": "object",
+              "properties": {
+                "accountId": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096
+                },
+                "folder": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096
+                },
+                "limit": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 500
+                }
+              },
+              "required": [
+                "accountId"
+              ],
+              "additionalProperties": false
+            },
+            "result": "driver",
+            "outputSchema": {
+              "type": "object",
+              "properties": {
+                "fetched": {
+                  "type": "integer"
+                },
+                "total": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "fetched",
+                "total"
+              ],
+              "additionalProperties": false
+            }
+          }
+        }
+      },
+      {
+        "id": "command.readFolder",
+        "version": "1.0.0",
+        "method": "command.readFolder",
+        "operation": true,
+        "request": {
+          "type": "unknown"
+        },
+        "response": {
+          "type": "unknown"
+        },
+        "metadata": {
+          "command": {
+            "id": "readFolder",
+            "description": "Read cached messages from one folder",
+            "effect": "read",
+            "inputSchema": {
+              "type": "object",
+              "properties": {
+                "accountId": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096
+                },
+                "folder": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096
+                }
+              },
+              "required": [
+                "accountId"
+              ],
+              "additionalProperties": false
+            },
+            "result": "driver",
+            "outputSchema": {
+              "type": "object",
+              "properties": {
+                "messages": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "logicalId": {
+                        "type": "string"
+                      },
+                      "contentRevision": {
+                        "type": "string"
+                      },
+                      "receivedAt": {
+                        "type": "string"
+                      },
+                      "bcc": {
+                        "type": "string"
+                      },
+                      "messageId": {
+                        "type": "string"
+                      },
+                      "from": {
+                        "type": "string"
+                      },
+                      "replyTo": {
+                        "type": "string"
+                      },
+                      "to": {
+                        "type": "string"
+                      },
+                      "cc": {
+                        "type": "string"
+                      },
+                      "subject": {
+                        "type": "string"
+                      },
+                      "date": {
+                        "type": "string"
+                      },
+                      "snippet": {
+                        "type": "string"
+                      },
+                      "text": {
+                        "type": "string"
+                      },
+                      "html": {
+                        "type": "string"
+                      },
+                      "originalDate": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "uid": {
+                        "type": "integer"
+                      },
+                      "uidValidity": {
+                        "type": "integer"
+                      },
+                      "attachmentDigests": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      },
+                      "complete": {
+                        "type": "boolean"
+                      },
+                      "flags": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      },
+                      "hasAttachments": {
+                        "type": "boolean"
+                      }
+                    },
+                    "required": [
+                      "uid",
+                      "messageId",
+                      "from",
+                      "to",
+                      "subject",
+                      "date",
+                      "snippet",
+                      "flags",
+                      "hasAttachments"
+                    ],
+                    "additionalProperties": false
+                  }
+                }
+              },
+              "required": [
+                "messages"
+              ],
+              "additionalProperties": false
+            }
+          }
+        }
+      },
+      {
+        "id": "command.readMessage",
+        "version": "1.0.0",
+        "method": "command.readMessage",
+        "operation": true,
+        "request": {
+          "type": "unknown"
+        },
+        "response": {
+          "type": "unknown"
+        },
+        "metadata": {
+          "command": {
+            "id": "readMessage",
+            "description": "Read one cached message by mailbox identity",
+            "effect": "read",
+            "inputSchema": {
+              "type": "object",
+              "properties": {
+                "accountId": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096
+                },
+                "folder": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096
+                },
+                "uid": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "uidValidity": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              },
+              "required": [
+                "accountId",
+                "folder",
+                "uid"
+              ],
+              "additionalProperties": false
+            },
+            "result": "driver",
+            "outputSchema": {
+              "type": "object",
+              "properties": {
+                "message": {
+                  "anyOf": [
+                    {
+                      "type": "object",
+                      "properties": {
+                        "logicalId": {
+                          "type": "string"
+                        },
+                        "contentRevision": {
+                          "type": "string"
+                        },
+                        "receivedAt": {
+                          "type": "string"
+                        },
+                        "bcc": {
+                          "type": "string"
+                        },
+                        "messageId": {
+                          "type": "string"
+                        },
+                        "from": {
+                          "type": "string"
+                        },
+                        "replyTo": {
+                          "type": "string"
+                        },
+                        "to": {
+                          "type": "string"
+                        },
+                        "cc": {
+                          "type": "string"
+                        },
+                        "subject": {
+                          "type": "string"
+                        },
+                        "date": {
+                          "type": "string"
+                        },
+                        "snippet": {
+                          "type": "string"
+                        },
+                        "text": {
+                          "type": "string"
+                        },
+                        "html": {
+                          "type": "string"
+                        },
+                        "originalDate": {
+                          "anyOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "uid": {
+                          "type": "integer"
+                        },
+                        "uidValidity": {
+                          "type": "integer"
+                        },
+                        "attachmentDigests": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        },
+                        "complete": {
+                          "type": "boolean"
+                        },
+                        "flags": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        },
+                        "hasAttachments": {
+                          "type": "boolean"
+                        },
+                        "id": {
+                          "type": "string"
+                        },
+                        "accountId": {
+                          "type": "string"
+                        },
+                        "folder": {
+                          "type": "string"
+                        },
+                        "categoryId": {
+                          "type": "string"
+                        },
+                        "isVip": {
+                          "type": "boolean"
+                        },
+                        "isSpam": {
+                          "type": "boolean"
+                        },
+                        "hasContact": {
+                          "type": "boolean"
+                        },
+                        "memberships": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "accountId": {
+                                "type": "string"
+                              },
+                              "folder": {
+                                "type": "string"
+                              },
+                              "uid": {
+                                "type": "integer"
+                              },
+                              "uidValidity": {
+                                "type": "integer"
+                              }
+                            },
+                            "required": [
+                              "accountId",
+                              "folder",
+                              "uid"
+                            ],
+                            "additionalProperties": false
+                          }
+                        },
+                        "addresses": {
+                          "type": "object",
+                          "properties": {
+                            "from": {
+                              "type": "array",
+                              "items": {
+                                "type": "object",
+                                "properties": {
+                                  "name": {
+                                    "type": "string"
+                                  },
+                                  "address": {
+                                    "type": "string"
+                                  }
+                                },
+                                "required": [
+                                  "name",
+                                  "address"
+                                ],
+                                "additionalProperties": false
+                              }
+                            },
+                            "to": {
+                              "type": "array",
+                              "items": {
+                                "type": "object",
+                                "properties": {
+                                  "name": {
+                                    "type": "string"
+                                  },
+                                  "address": {
+                                    "type": "string"
+                                  }
+                                },
+                                "required": [
+                                  "name",
+                                  "address"
+                                ],
+                                "additionalProperties": false
+                              }
+                            },
+                            "cc": {
+                              "type": "array",
+                              "items": {
+                                "type": "object",
+                                "properties": {
+                                  "name": {
+                                    "type": "string"
+                                  },
+                                  "address": {
+                                    "type": "string"
+                                  }
+                                },
+                                "required": [
+                                  "name",
+                                  "address"
+                                ],
+                                "additionalProperties": false
+                              }
+                            },
+                            "replyTo": {
+                              "type": "array",
+                              "items": {
+                                "type": "object",
+                                "properties": {
+                                  "name": {
+                                    "type": "string"
+                                  },
+                                  "address": {
+                                    "type": "string"
+                                  }
+                                },
+                                "required": [
+                                  "name",
+                                  "address"
+                                ],
+                                "additionalProperties": false
+                              }
+                            }
+                          },
+                          "required": [
+                            "from",
+                            "to",
+                            "cc",
+                            "replyTo"
+                          ],
+                          "additionalProperties": false
+                        }
+                      },
+                      "required": [
+                        "uid",
+                        "messageId",
+                        "from",
+                        "to",
+                        "subject",
+                        "date",
+                        "snippet",
+                        "flags",
+                        "hasAttachments",
+                        "id",
+                        "accountId",
+                        "folder",
+                        "memberships",
+                        "addresses"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "message"
+              ],
+              "additionalProperties": false
+            }
+          }
+        }
+      },
+      {
+        "id": "command.queryMessages",
+        "version": "1.0.0",
+        "method": "command.queryMessages",
+        "operation": true,
+        "request": {
+          "type": "unknown"
+        },
+        "response": {
+          "type": "unknown"
+        },
+        "metadata": {
+          "command": {
+            "id": "queryMessages",
+            "description": "Search and page cached email messages",
+            "effect": "read",
+            "inputSchema": {
+              "type": "object",
+              "properties": {
+                "accountId": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096
+                },
+                "view": {
+                  "enum": [
+                    "recent",
+                    "unread",
+                    "flagged",
+                    "folder"
+                  ]
+                },
+                "accountIds": {
+                  "type": "array",
+                  "maxItems": 100,
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 4096
+                  }
+                },
+                "filters": {
+                  "type": "object",
+                  "properties": {
+                    "contact": {
+                      "enum": [
+                        "all",
+                        "known",
+                        "unknown"
+                      ]
+                    },
+                    "vip": {
+                      "enum": [
+                        "all",
+                        "vip",
+                        "others"
+                      ]
+                    },
+                    "spam": {
+                      "enum": [
+                        "default",
+                        "spam",
+                        "not-spam",
+                        "all"
+                      ]
+                    },
+                    "categoryId": {
+                      "type": "string",
+                      "maxLength": 200
+                    }
+                  },
+                  "required": [],
+                  "additionalProperties": false
+                },
+                "folder": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096
+                },
+                "query": {
+                  "type": "string",
+                  "maxLength": 1000
+                },
+                "limit": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 200
+                },
+                "cursor": {
+                  "type": "string",
+                  "maxLength": 10000
+                }
+              },
+              "required": [
+                "accountId",
+                "view"
+              ],
+              "additionalProperties": false
+            },
+            "result": "driver",
+            "outputSchema": {
+              "type": "object",
+              "properties": {
+                "messages": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "logicalId": {
+                        "type": "string"
+                      },
+                      "contentRevision": {
+                        "type": "string"
+                      },
+                      "receivedAt": {
+                        "type": "string"
+                      },
+                      "bcc": {
+                        "type": "string"
+                      },
+                      "messageId": {
+                        "type": "string"
+                      },
+                      "from": {
+                        "type": "string"
+                      },
+                      "replyTo": {
+                        "type": "string"
+                      },
+                      "to": {
+                        "type": "string"
+                      },
+                      "cc": {
+                        "type": "string"
+                      },
+                      "subject": {
+                        "type": "string"
+                      },
+                      "date": {
+                        "type": "string"
+                      },
+                      "snippet": {
+                        "type": "string"
+                      },
+                      "text": {
+                        "type": "string"
+                      },
+                      "html": {
+                        "type": "string"
+                      },
+                      "originalDate": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "uid": {
+                        "type": "integer"
+                      },
+                      "uidValidity": {
+                        "type": "integer"
+                      },
+                      "attachmentDigests": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      },
+                      "complete": {
+                        "type": "boolean"
+                      },
+                      "flags": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      },
+                      "hasAttachments": {
+                        "type": "boolean"
+                      },
+                      "id": {
+                        "type": "string"
+                      },
+                      "accountId": {
+                        "type": "string"
+                      },
+                      "folder": {
+                        "type": "string"
+                      },
+                      "categoryId": {
+                        "type": "string"
+                      },
+                      "isVip": {
+                        "type": "boolean"
+                      },
+                      "isSpam": {
+                        "type": "boolean"
+                      },
+                      "hasContact": {
+                        "type": "boolean"
+                      },
+                      "memberships": {
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "properties": {
+                            "accountId": {
+                              "type": "string"
+                            },
+                            "folder": {
+                              "type": "string"
+                            },
+                            "uid": {
+                              "type": "integer"
+                            },
+                            "uidValidity": {
+                              "type": "integer"
+                            }
+                          },
+                          "required": [
+                            "accountId",
+                            "folder",
+                            "uid"
+                          ],
+                          "additionalProperties": false
+                        }
+                      },
+                      "addresses": {
+                        "type": "object",
+                        "properties": {
+                          "from": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "name": {
+                                  "type": "string"
+                                },
+                                "address": {
+                                  "type": "string"
+                                }
+                              },
+                              "required": [
+                                "name",
+                                "address"
+                              ],
+                              "additionalProperties": false
+                            }
+                          },
+                          "to": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "name": {
+                                  "type": "string"
+                                },
+                                "address": {
+                                  "type": "string"
+                                }
+                              },
+                              "required": [
+                                "name",
+                                "address"
+                              ],
+                              "additionalProperties": false
+                            }
+                          },
+                          "cc": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "name": {
+                                  "type": "string"
+                                },
+                                "address": {
+                                  "type": "string"
+                                }
+                              },
+                              "required": [
+                                "name",
+                                "address"
+                              ],
+                              "additionalProperties": false
+                            }
+                          },
+                          "replyTo": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "name": {
+                                  "type": "string"
+                                },
+                                "address": {
+                                  "type": "string"
+                                }
+                              },
+                              "required": [
+                                "name",
+                                "address"
+                              ],
+                              "additionalProperties": false
+                            }
+                          }
+                        },
+                        "required": [
+                          "from",
+                          "to",
+                          "cc",
+                          "replyTo"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "required": [
+                      "uid",
+                      "messageId",
+                      "from",
+                      "to",
+                      "subject",
+                      "date",
+                      "snippet",
+                      "flags",
+                      "hasAttachments",
+                      "id",
+                      "accountId",
+                      "folder",
+                      "memberships",
+                      "addresses"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "total": {
+                  "type": "integer"
+                },
+                "cursor": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "messages",
+                "total"
+              ],
+              "additionalProperties": false
+            }
+          }
+        }
+      },
+      {
+        "id": "command.parseAddresses",
+        "version": "1.0.0",
+        "method": "command.parseAddresses",
+        "operation": true,
+        "request": {
+          "type": "unknown"
+        },
+        "response": {
+          "type": "unknown"
+        },
+        "metadata": {
+          "command": {
+            "id": "parseAddresses",
+            "description": "Parse and validate email recipients",
+            "effect": "read",
+            "inputSchema": {
+              "type": "object",
+              "properties": {
+                "value": {
+                  "type": "string",
+                  "maxLength": 32000
+                }
+              },
+              "required": [
+                "value"
+              ],
+              "additionalProperties": false
+            },
+            "result": "driver",
+            "outputSchema": {
+              "type": "object",
+              "properties": {
+                "addresses": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "name": {
+                        "type": "string"
+                      },
+                      "address": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "name",
+                      "address"
+                    ],
+                    "additionalProperties": false
+                  }
+                }
+              },
+              "required": [
+                "addresses"
+              ],
+              "additionalProperties": false
+            }
+          }
+        }
+      },
+      {
+        "id": "command.sendEmail",
+        "version": "1.0.0",
+        "method": "command.sendEmail",
+        "operation": true,
+        "request": {
+          "type": "unknown"
+        },
+        "response": {
+          "type": "unknown"
+        },
+        "metadata": {
+          "command": {
+            "id": "sendEmail",
+            "description": "Send an email through a configured account; reconcile uncertain delivery before retrying",
+            "effect": "execute",
+            "inputSchema": {
+              "type": "object",
+              "properties": {
+                "accountId": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096
+                },
+                "to": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096
+                },
+                "cc": {
+                  "type": "string",
+                  "maxLength": 500000
+                },
+                "bcc": {
+                  "type": "string",
+                  "maxLength": 500000
+                },
+                "subject": {
+                  "type": "string",
+                  "maxLength": 500000
+                },
+                "text": {
+                  "type": "string",
+                  "maxLength": 500000
+                },
+                "html": {
+                  "type": "string",
+                  "maxLength": 500000
+                },
+                "inReplyTo": {
+                  "type": "string",
+                  "maxLength": 500000
+                }
+              },
+              "required": [
+                "accountId",
+                "to"
+              ],
+              "additionalProperties": false
+            },
+            "result": "driver",
+            "outputSchema": {
+              "type": "object",
+              "properties": {
+                "messageId": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "messageId"
+              ],
+              "additionalProperties": false
+            }
+          }
+        }
+      },
+      {
+        "id": "command.applyMessageAction",
+        "version": "1.0.0",
+        "method": "command.applyMessageAction",
+        "operation": true,
+        "request": {
+          "type": "unknown"
+        },
+        "response": {
+          "type": "unknown"
+        },
+        "metadata": {
+          "command": {
+            "id": "applyMessageAction",
+            "description": "Change a remote message read/flag state or move it to archive, trash or junk",
+            "effect": "execute",
+            "inputSchema": {
+              "type": "object",
+              "properties": {
+                "accountId": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096
+                },
+                "folder": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096
+                },
+                "uid": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "uidValidity": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "action": {
+                  "enum": [
+                    "mark-read",
+                    "mark-unread",
+                    "flag",
+                    "unflag",
+                    "archive",
+                    "trash",
+                    "junk"
+                  ]
+                }
+              },
+              "required": [
+                "accountId",
+                "folder",
+                "uid",
+                "action"
+              ],
+              "additionalProperties": false
+            },
+            "result": "driver",
+            "outputSchema": {
+              "type": "object",
+              "properties": {
+                "action": {
+                  "enum": [
+                    "mark-read",
+                    "mark-unread",
+                    "flag",
+                    "unflag",
+                    "archive",
+                    "trash",
+                    "junk"
+                  ]
+                },
+                "folder": {
+                  "type": "string"
+                },
+                "messages": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "logicalId": {
+                        "type": "string"
+                      },
+                      "contentRevision": {
+                        "type": "string"
+                      },
+                      "receivedAt": {
+                        "type": "string"
+                      },
+                      "bcc": {
+                        "type": "string"
+                      },
+                      "messageId": {
+                        "type": "string"
+                      },
+                      "from": {
+                        "type": "string"
+                      },
+                      "replyTo": {
+                        "type": "string"
+                      },
+                      "to": {
+                        "type": "string"
+                      },
+                      "cc": {
+                        "type": "string"
+                      },
+                      "subject": {
+                        "type": "string"
+                      },
+                      "date": {
+                        "type": "string"
+                      },
+                      "snippet": {
+                        "type": "string"
+                      },
+                      "text": {
+                        "type": "string"
+                      },
+                      "html": {
+                        "type": "string"
+                      },
+                      "originalDate": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "uid": {
+                        "type": "integer"
+                      },
+                      "uidValidity": {
+                        "type": "integer"
+                      },
+                      "attachmentDigests": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      },
+                      "complete": {
+                        "type": "boolean"
+                      },
+                      "flags": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      },
+                      "hasAttachments": {
+                        "type": "boolean"
+                      }
+                    },
+                    "required": [
+                      "uid",
+                      "messageId",
+                      "from",
+                      "to",
+                      "subject",
+                      "date",
+                      "snippet",
+                      "flags",
+                      "hasAttachments"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "destinationFolder": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "action",
+                "folder",
+                "messages"
+              ],
+              "additionalProperties": false
+            }
+          }
+        }
+      }
+    ]
   },
   "permissions": {
     "network": {

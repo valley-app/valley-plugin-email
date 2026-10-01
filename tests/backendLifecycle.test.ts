@@ -1,3 +1,4 @@
+import { assertCommandOutput } from './commandContracts'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createMockValleyApi } from '@valley/plugin-testkit'
 import type { ValleyPluginManifest } from '@valley/plugin-sdk/types'
@@ -32,7 +33,7 @@ async function fixture(ids = ['a', 'b'], i18n?: MailBackendApi['i18n']) {
     rpc: { handle: (name, handler) => { handlers.set(name, handler); return () => { handlers.delete(name) } }, emit: vi.fn() }
   }
   const dispose = register(api)
-  const call = (name: string, payload: unknown) => handlers.get(name)!(payload)
+  const call = async (name: string, payload: unknown) => assertCommandOutput(name, payload, await handlers.get(name)!(payload))
   return { mock, scope, api, handlers, dispose, call }
 }
 

@@ -310,7 +310,10 @@ export function register(api: MailBackendApi): () => Promise<void> {
         ...(error instanceof RemoteMailCacheError ? { outcome: 'remote-complete' as const, data: error.result } : {}) }
     }
   }
-    return api.rpc.handleOperation && ['queryMessages', 'readMessage'].includes(name) ? api.rpc.handleOperation(name, handler) : api.rpc.handle(name, handler)
+    const operation = api.rpc.handleOperation?.(`command.${name}`, handler)
+    const existingOperation = ['queryMessages', 'readMessage'].includes(name) ? api.rpc.handleOperation?.(name, handler) : undefined
+    const rpc = ['queryMessages', 'readMessage'].includes(name) && operation ? undefined : api.rpc.handle(name, handler)
+    return () => { operation?.(); existingOperation?.(); rpc?.() }
   })
   off.push(api.rpc.handle('notifications.action', async payload => {
     const event = z.object({ action: z.enum(['read', 'reply']), targetItemId: z.string().max(256), input: z.string().max(16384).optional(), occurrenceId: z.string().regex(/^[a-f0-9]{64}$/) }).passthrough().parse(payload)
