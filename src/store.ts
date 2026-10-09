@@ -90,6 +90,7 @@ export interface EmailStore {
   saveDraft(): Promise<boolean>
   flushDraft(): Promise<void>
   cancelCompose(): Promise<void>
+  closeCompose(): Promise<{ discarded: boolean }>
   send(): Promise<boolean>
   removeAccount(accountId: string): Promise<void>
   goBack(): Promise<boolean>
@@ -182,7 +183,7 @@ function createStore(api: ValleyPluginApi): EmailStore {
     invalidateMessages: () => { messagesController.invalidateMessages() }, refreshMessages: () => loadMessages(),
     sent: (draft) => { if (drafts.draft === draft) drafts.draft = null }
   }, drafts, mail)
-  const { startCompose, updateDraft, saveDraft, cancelCompose, send } = draftController
+  const { startCompose, updateDraft, saveDraft, cancelCompose, closeCompose, send } = draftController
   const classification = createClassificationQueue(api, classification => set({ classification }), async () => { messagesController.invalidateMessages(); await loadMessages() })
   const projections = createEmailProjections(api, async () => { messagesController.invalidateMessages(); await loadMessages() })
   const offSync = mail.onSync((event) => {
@@ -221,7 +222,7 @@ function createStore(api: ValleyPluginApi): EmailStore {
       await api.settings.set('vipAddresses', [...values])
     },
     assignCategory: (id, categoryId) => classification.assign(id, categoryId), resetCategory: classification.reset, classifyExisting: ids => classification.enqueue(ids), retryClassification: classification.retry, cancelClassification: classification.cancel,
-    startCompose, updateDraft, saveDraft, cancelCompose, send, flushDraft: draftController.flush,
+    startCompose, updateDraft, saveDraft, cancelCompose, closeCompose, send, flushDraft: draftController.flush,
     removeAccount: async (accountId) => {
       if (disposed) return
       const result = await mail.removeAccount(accountId)

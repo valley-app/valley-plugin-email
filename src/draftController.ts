@@ -6,7 +6,7 @@ import { uiText } from './localization'
 import { createDraftRepository, type RetainedDraft } from './draftRepository'
 
 interface DraftPorts {
-  snapshot(): Pick<EmailSnapshot, 'compose' | 'sending' | 'selectedAccountId' | 'accounts'>
+  snapshot(): Pick<EmailSnapshot, 'compose' | 'composing' | 'sending' | 'selectedAccountId' | 'accounts'>
   active(): boolean
   set(patch: Partial<EmailSnapshot>): void
   report(error: unknown): void
@@ -154,6 +154,21 @@ export function createDraftController(api: ValleyPluginApi, ports: DraftPorts, r
       ports.updateTitle()
     } catch (error) { if (current() && token === generation) ports.report(error) }
   }
+  async function closeCompose(): Promise<{ discarded: boolean }> {
+    const refuse = (code: string, message: string): never => { throw Object.assign(new Error(message), { code, outcome: 'not-applied' as const }) }
+    const known = await repository.loaded.then(() => true, () => false)
+    const snapshot = ports.snapshot()
+    if (!current()) refuse('COMPOSE_UNAVAILABLE', 'The email window is no longer active.')
+    if (!snapshot.composing || !snapshot.compose) refuse('COMPOSE_NOT_OPEN', 'No email draft is open for composing.')
+    if (snapshot.sending) refuse('COMPOSE_SENDING', 'The open email draft is being sent.')
+    const draft = snapshot.compose!
+    ++generation
+    const blank = known && !draft.dirty && draft.mode === 'new' && !draft.inReplyTo && !repository.holds(draft)
+      && !draft.to.length && !draft.cc.length && !draft.bcc.length && !draft.subject && !draft.text && !Object.values(draft.pending).some(Boolean)
+    ports.set(blank ? { compose: null, composing: false } : { composing: false })
+    ports.updateTitle()
+    return { discarded: blank }
+  }
   function send(): Promise<boolean> {
     const draft = ports.snapshot().compose
     if (!current() || !draft || ports.snapshot().sending || !draft.to.length || Object.values(draft.pending).some((value) => value.trim())) return Promise.resolve(false)
@@ -193,7 +208,7 @@ export function createDraftController(api: ValleyPluginApi, ports: DraftPorts, r
     await repository.flush()
   }
   return {
-    whenReady, startCompose, updateDraft, saveDraft, cancelCompose, send, flush,
+    whenReady, startCompose, updateDraft, saveDraft, cancelCompose, closeCompose, send, flush,
     dispose(): Promise<void> {
       if (draining) return draining
       active = false

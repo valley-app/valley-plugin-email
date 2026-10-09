@@ -13,6 +13,8 @@ export function createMailMock(options?: Parameters<typeof createMockValleyApi>[
     parseAddresses: async (value) => ({ ok: true, data: { addresses: parseEmailAddresses(value, true) } }),
     listAccounts: async () => ({ ok: true, data: { accounts: [] } }),
     addSmtpAccount: async () => ({ ok: false, error: 'No account fixture' }),
+    updateSmtpAccount: async () => ({ ok: false, error: 'No account fixture' }),
+    testAccount: async () => ({ ok: false, error: 'No connection fixture' }),
     removeAccount: async () => ({ ok: true, data: { accounts: [] } }),
     listFolders: async () => ({ ok: true, data: { folders: [], mailboxes: [] } }),
     syncFolder: async () => ({ ok: true }),
@@ -30,6 +32,8 @@ export function createMailMock(options?: Parameters<typeof createMockValleyApi>[
         case 'parseAddresses': return mail.parseAddresses(String(input.value))
         case 'listAccounts': return mail.listAccounts()
         case 'addSmtpAccount': return mail.addSmtpAccount(payload as EmailSmtpAccountInput)
+        case 'updateSmtpAccount': return mail.updateSmtpAccount(payload as Parameters<EmailDriver['updateSmtpAccount']>[0])
+        case 'testAccount': case 'command.testAccount': return mail.testAccount(String(input.accountId))
         case 'removeAccount': return mail.removeAccount(String(input.accountId))
         case 'listFolders': return mail.listFolders(String(input.accountId))
         case 'syncFolder': return mail.syncFolder(String(input.accountId), input.folder as string | undefined, input.limit as number | undefined)

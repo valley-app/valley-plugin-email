@@ -78,6 +78,7 @@ export function createDraftRepository(api: ValleyPluginApi, retained: RetainedDr
   return {
     loaded,
     block(error: unknown): void { failure = { error } },
+    holds(draft: ComposeDraft): boolean { return (desired !== undefined ? desired : stored)?.draft.id === draft.id },
     save(draft: ComposeDraft, sending = false): Promise<void> {
       const previous = desired ?? stored
       const value = draftSchema.parse(draft)

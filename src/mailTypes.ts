@@ -14,17 +14,17 @@ export interface EmailAccount {
   id: string
   provider: EmailProvider
   address: string
+  login?: string
   displayName?: string
   imap: MailHost
   smtp: MailHost
   createdAt: number
-  /** PureMail only: health of the stored password (`unreadable` = keychain can
-   *  no longer decrypt it — prompt a re-entry instead of failing silently). */
-  secretState?: 'absent' | 'ok' | 'unreadable'
+  secretState?: 'absent' | 'stored' | 'ok' | 'unreadable'
 }
 
 /** A message payload with a separate IMAP location. */
 export interface CachedMessage {
+  automationHeaders?: MailAutomationHeaders
   logicalId?: string
   contentRevision?: string
   uidValidity?: number
@@ -46,6 +46,18 @@ export interface CachedMessage {
   html?: string
   flags: string[]
   hasAttachments: boolean
+}
+
+export interface MailAutomationHeaders {
+  observed: true
+  autoSubmitted: string[]
+  precedence: string[]
+  listId: string[]
+  suppress: string[]
+  origin: string[]
+  inReplyTo?: string[]
+  references?: string[]
+  uncertain?: boolean
 }
 
 /** One selectable IMAP mailbox plus counts available from the local cache. */
@@ -142,8 +154,9 @@ export interface EmailAddressesResult extends DriverResult {
 }
 
 export interface EmailFoldersResult extends DriverResult {
-  data?: { folders: string[]; mailboxes: EmailMailbox[] }
+  data?: { folders: string[]; mailboxes: EmailMailbox[]; warning?: string }
 }
+export interface EmailConnectionResult extends DriverResult { data?: { checkedAt: string; imap: { ok: boolean; error?: string }; smtp: { ok: boolean; error?: string } } }
 
 export type EmailMessageAction = 'mark-read' | 'mark-unread' | 'flag' | 'unflag' | 'archive' | 'trash' | 'junk'
 
@@ -166,6 +179,7 @@ export interface EmailMessageActionResult extends DriverResult {
 
 export interface EmailSmtpAccountInput {
   address: string
+  login?: string
   displayName?: string
   password: string
   imap: MailHost
@@ -195,6 +209,8 @@ export interface EmailDriver {
   listAccounts(): Promise<EmailAccountsResult>
   /** Add a generic SMTP/IMAP (PureMail) account; verifies before saving. */
   addSmtpAccount(input: EmailSmtpAccountInput): Promise<EmailAccountResult>
+  updateSmtpAccount(input: { accountId: string; address: string; login: string; password: string }): Promise<EmailAccountResult>
+  testAccount(accountId: string, cancellation?: AbortSignal): Promise<EmailConnectionResult>
   /** Remove an account, its cached messages and stored credentials. */
   removeAccount(accountId: string): Promise<EmailAccountsResult>
   /** List an account's IMAP mailbox folders. */

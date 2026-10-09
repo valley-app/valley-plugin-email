@@ -1,3 +1,4 @@
+import Ajv from 'ajv'
 import { describe, expect, it, vi } from 'vitest'
 import { createMailMock as createMockValleyApi } from './mailMock'
 import type { CachedMessage, EmailAccount } from '../src/mailTypes'
@@ -48,6 +49,19 @@ function setup() {
     data: { action: 'archive', folder: 'INBOX', destinationFolder: 'Archive', messages: [] }
   })
   vi.spyOn(email, 'sendEmail').mockResolvedValue({ ok: true, data: { messageId: '<sent@example.test>' } })
+  const original = mock.api.commands.register.bind(mock.api.commands)
+  const validator = new Ajv({ strict: false, allowUnionTypes: true })
+  vi.spyOn(mock.api.commands, 'register').mockImplementation(registered => {
+    const specification = registered as typeof registered & { outputSchema?: Record<string, unknown> }
+    expect(specification.outputSchema, specification.id).toBeDefined()
+    const validate = validator.compile(specification.outputSchema!)
+    return original({ ...specification, run: async (input, context) => {
+      const result = await specification.run(input, context)
+      const value = specification.sideEffect === 'write' && result && typeof result === 'object' && 'value' in result ? result.value : result
+      expect(validate(value), `${specification.id}: ${JSON.stringify(validate.errors)}`).toBe(true)
+      return result
+    } })
+  })
   registerEmailAgentCommands(mock.api)
   return { mock, email, provider: emailAgentTools(mock.api) }
 }
@@ -117,5 +131,37 @@ describe('email assistant tools', () => {
     expect(await mock.api.commands.preview(`${mock.api.pluginId}:compose-email`, { accountId: account.id, to: 'field@example.test', subject: 'Survey', text: 'Ready.' })).toMatchObject({ ok: true, value: { action: 'compose-email', accountId: account.id } })
     expect(email.sendEmail).not.toHaveBeenCalled()
     expect(email.applyMessageAction).not.toHaveBeenCalled()
+  })
+})
+
+describe('email assistant mutation reverts', () => {
+  it('registers an exact revert for changed flags and none for no-op flags or mailbox moves', async () => {
+    const { mock, email } = setup()
+    let flags = ['\\Flagged']
+    vi.mocked(email.readFolder).mockImplementation(async () => ({ ok: true, data: { messages: [{ ...message, flags: [...flags] }] } }))
+    vi.mocked(email.applyMessageAction).mockImplementation(async (input) => {
+      if (input.action === 'mark-read') flags = ['\\Flagged', '\\Seen']
+      if (input.action === 'mark-unread') flags = ['\\Flagged']
+      return { ok: true, data: { action: input.action, folder: input.folder, messages: [] } }
+    })
+    const target = { accountId: account.id, folder: 'INBOX', uid: 17 }
+    expect(await mock.api.commands.executeOwn('update-email-message', { ...target, action: 'mark-read' })).toMatchObject({ ok: true })
+    expect(mock.busUndo).toHaveLength(1)
+    await mock.busUndo[0].undo()
+    expect(email.applyMessageAction).toHaveBeenLastCalledWith({ ...target, action: 'mark-unread' })
+    expect(flags).toEqual(['\\Flagged'])
+    await mock.busUndo[0].redo!()
+    expect(flags).toEqual(['\\Flagged', '\\Seen'])
+    flags = ['\\Flagged']
+    await expect(mock.busUndo[0].undo()).rejects.toMatchObject({ code: 'REVISION_CONFLICT', outcome: 'not-applied' })
+    expect(await mock.api.commands.executeOwn('update-email-message', { ...target, action: 'flag' })).toMatchObject({ ok: true })
+    expect(await mock.api.commands.executeOwn('update-email-message', { ...target, action: 'archive' })).toMatchObject({ ok: true })
+    expect(mock.busUndo).toHaveLength(1)
+  })
+
+  it('declares that only read and flag changes are undoable, not archive or trash moves', () => {
+    const { mock } = setup()
+    const label = mock.api.commands.list().find(entry => entry.id === 'email:update-email-message')?.label
+    expect(label).toMatch(/Archive and Trash moves cannot be undone/)
   })
 })

@@ -6,16 +6,41 @@ import type { CachedMessage, EmailAccount, EmailMailbox, EmailMessageAction, Ema
 import { decodeBytes, encodeBytes } from './encoding'
 import { parseEmailAddresses } from './query'
 import { digest } from './identity'
+import { automationHeaders } from './automation'
 
 export interface MailTransportApi {
   network: Pick<PluginNetworkApi, 'fetch' | 'open' | 'read' | 'write' | 'startTls' | 'close'>
-  credentials: Pick<PluginCredentialApi, 'state' | 'set' | 'delete' | 'handle' | 'write'>
+  credentials: Pick<PluginCredentialApi, 'presence' | 'state' | 'set' | 'delete' | 'handle' | 'write'>
   accounts: Pick<PluginAccountApi, 'list' | 'authorize'>
 }
 
 const encoder = new TextEncoder()
 const decoder = new TextDecoder()
 const MAX_MESSAGE_BYTES = 64 * 1024 * 1024
+const yieldTurn = (delay = 0): Promise<void> => new Promise(resolve => setTimeout(resolve, delay))
+let mimeSchedulingInstalled = false
+
+export function parseMail(raw: Uint8Array) {
+  if (!mimeSchedulingInstalled) {
+    type IncrementalParser = PostalMime & { processLine(line: Uint8Array, final: boolean): Promise<void> }
+    const prototype = PostalMime.prototype as IncrementalParser
+    const processLine = prototype.processLine
+    if (typeof processLine !== 'function') throw new Error('The installed MIME parser does not support cooperative scheduling.')
+    const lines = new WeakMap<PostalMime, number>()
+    prototype.processLine = async function(line, final) {
+      const count = (lines.get(this) ?? 0) + 1
+      lines.set(this, count)
+      if (count % 32 === 0) await yieldTurn()
+      return processLine.call(this, line.slice(), final)
+    }
+    mimeSchedulingInstalled = true
+  }
+  return PostalMime.parse(raw)
+}
+
+export function mailDiagnostic(error: unknown): string {
+  return (error instanceof Error ? error.message : String(error)).replace(/[\x00-\x1f\x7f]/g, ' ').replace(/\b(?:Bearer|AUTH\s+(?:PLAIN|XOAUTH2))\s+\S+/gi, '[redacted]').replace(/\b(password|secret|token|api[-_]?key)\s*[:=]\s*\S+/gi, '$1=[redacted]').replace(/(https?:\/\/)[^/\s@]+:[^/\s@]+@/gi, '$1[redacted]@').slice(0, 512)
+}
 
 export function accountEndpoint(account: EmailAccount, kind: 'imap' | 'smtp'): PluginSocketEndpoint {
   const endpoint = account[kind]
@@ -28,6 +53,7 @@ const credentialSource = (account: EmailAccount) => ({ store: MAIL_CREDENTIAL_ST
 
 class Connection {
   private buffer = new Uint8Array()
+  private emptyReads = 0
   constructor(readonly api: MailTransportApi, readonly id: string) {}
   async write(value: string): Promise<void> { await this.api.network.write(this.id, encodeBytes(encoder.encode(value))) }
   async close(): Promise<void> { await this.api.network.close(this.id).catch(() => undefined) }
@@ -52,6 +78,12 @@ class Connection {
     const reply = await this.api.network.read(this.id, 65536)
     const bytes = decodeBytes(reply.base64)
     if (!bytes.length && reply.done) throw new Error(t('email.backend.closed'))
+    if (!bytes.length) {
+      if (++this.emptyReads > 8) throw new Error(t('email.backend.emptyRead'))
+      await yieldTurn(10)
+      return
+    }
+    this.emptyReads = 0
     const next = new Uint8Array(this.buffer.length + bytes.length)
     next.set(this.buffer)
     next.set(bytes, this.buffer.length)
@@ -62,7 +94,7 @@ class Connection {
       ? await this.api.credentials.handle(credentialName(account.id), credentialSource(account))
       : await this.api.accounts.authorize(account.id, 'mail', accountEndpoint(account, kind))
     const template = account.provider === 'pureemail'
-      ? [`\0${account.address}\0`, { credential }]
+      ? [`\0${account.login || account.address}\0`, { credential }]
       : [`user=${account.address}\x01auth=Bearer `, { credential }, '\x01\x01']
     await this.api.credentials.write(this.id, template, { encoding: 'base64', prefix, suffix })
   }
@@ -157,9 +189,10 @@ class ImapConnection extends Connection {
   private async finish(tag: string): Promise<ImapReply[]> {
     const replies: ImapReply[] = []
     for (let count = 0; count < 100000; count++) {
+      if (count && count % 32 === 0) await yieldTurn()
       const reply = await this.reply()
       if (reply.line.startsWith(`${tag} `)) {
-        if (!reply.line.startsWith(`${tag} OK`)) throw new Error(reply.line.replace(/^\S+\s+\S+\s*/, ''))
+        if (!reply.line.startsWith(`${tag} OK`)) throw new Error(mailDiagnostic(reply.line.replace(/^\S+\s+\S+\s*/, '')))
         return [...replies, reply]
       }
       if (reply.line.startsWith('* BYE')) throw new Error(t('email.backend.ended'))
@@ -184,9 +217,9 @@ class ImapConnection extends Connection {
     const mechanism = account.provider !== 'pureemail' ? 'XOAUTH2' : this.capabilities.has('AUTH=PLAIN') ? 'PLAIN' : this.capabilities.has('AUTH=LOGIN') ? 'LOGIN' : 'PLAIN'
     await this.write(`${tag} AUTHENTICATE ${mechanism}\r\n`)
     const continuation = await this.line()
-    if (!continuation.startsWith('+')) throw new Error(t('email.backend.authUnsupported'))
+    if (!continuation.startsWith('+')) throw new Error(continuation.startsWith(`${tag} `) ? mailDiagnostic(continuation.replace(/^\S+\s+\S+\s*/, '')) : t('email.backend.authUnsupported'))
     if (mechanism === 'LOGIN') {
-      await this.write(`${encodeBytes(encoder.encode(account.address))}\r\n`)
+      await this.write(`${encodeBytes(encoder.encode(account.login || account.address))}\r\n`)
       if (!(await this.line()).startsWith('+')) throw new Error(t('email.backend.authentication'))
       await this.password(account)
     } else await this.authenticate(account, 'imap', '')
@@ -237,9 +270,10 @@ export async function fetchFolder(api: MailTransportApi, account: EmailAccount, 
       const raw = fields.get('BODY[]') ?? fields.get('RFC822')
       const uid = Number(fields.get('UID'))
       if (!(raw instanceof Uint8Array) || !Number.isSafeInteger(uid) || uid < 1) continue
-      const parsed = await PostalMime.parse(raw)
+      const parsed = await parseMail(raw)
+      await yieldTurn()
       const flags = fields.get('FLAGS')
-      messages.push({ uid, uidValidity, complete: true, originalDate: parsed.date ?? null, receivedAt: typeof fields.get('INTERNALDATE') === 'string' ? String(fields.get('INTERNALDATE')) : undefined,
+      messages.push({ uid, uidValidity, complete: true, automationHeaders: automationHeaders(parsed.headers), originalDate: parsed.date ?? null, receivedAt: typeof fields.get('INTERNALDATE') === 'string' ? String(fields.get('INTERNALDATE')) : undefined,
         attachmentDigests: await Promise.all(parsed.attachments.map(async attachment => digest(JSON.stringify([attachment.filename, attachment.mimeType, attachment.contentId ?? null, await digest(typeof attachment.content === 'string' ? attachment.content : new Uint8Array(attachment.content))])))),
         bcc: addressText(parsed.bcc) || undefined, messageId: parsed.messageId ?? '', from: addressText(parsed.from ? [parsed.from] : []),
         replyTo: addressText(parsed.replyTo) || undefined, to: addressText(parsed.to), cc: addressText(parsed.cc) || undefined,
@@ -252,7 +286,7 @@ export async function fetchFolder(api: MailTransportApi, account: EmailAccount, 
 }
 
 export async function verifyImap(api: MailTransportApi, account: EmailAccount): Promise<void> {
-  await withImap(api, account, (connection) => connection.command('SELECT "INBOX"').then(() => undefined))
+  await withImap(api, account, (connection) => connection.command('EXAMINE "INBOX"').then(() => undefined))
 }
 
 export async function applyMessageAction(api: MailTransportApi, account: EmailAccount, folder: string, uid: number, action: EmailMessageAction, uidValidity?: number): Promise<{ destinationFolder?: string; destinationUid?: number }> {
@@ -290,14 +324,36 @@ async function smtpReply(connection: Connection, expected: number[]): Promise<st
     if (!/^\d{3}[ -]/.test(line)) throw new Error(t('email.backend.smtpResponse'))
     lines.push(line)
     if (line[3] === ' ') {
-      if (!expected.includes(Number(line.slice(0, 3)))) throw new Error(line.slice(4))
+      if (!expected.includes(Number(line.slice(0, 3)))) throw new Error(mailDiagnostic(line))
       return lines
     }
   }
   throw new Error(t('email.backend.smtpLimit'))
 }
 
-export async function sendMail(api: MailTransportApi, account: EmailAccount, input: EmailSendInput): Promise<string> {
+async function initializeSmtp(connection: Connection, account: EmailAccount): Promise<void> {
+  await smtpReply(connection, [220])
+  await connection.write('EHLO localhost\r\n')
+  let capabilities = await smtpReply(connection, [250])
+  if (!account.smtp.secure) {
+    await connection.write('STARTTLS\r\n'); await smtpReply(connection, [220]); await connection.api.network.startTls(connection.id)
+    await connection.write('EHLO localhost\r\n'); capabilities = await smtpReply(connection, [250])
+  }
+  const auth = capabilities.filter((line) => /^250[ -]AUTH(?:=| )/i.test(line)).join(' ').toUpperCase()
+  if (account.provider === 'pureemail' && !/\bPLAIN\b/.test(auth) && /\bLOGIN\b/.test(auth)) {
+    await connection.write('AUTH LOGIN\r\n'); await smtpReply(connection, [334])
+    await connection.write(`${encodeBytes(encoder.encode(account.login || account.address))}\r\n`); await smtpReply(connection, [334])
+    await connection.password(account)
+  } else await connection.authenticate(account, 'smtp', `AUTH ${account.provider === 'pureemail' ? 'PLAIN' : 'XOAUTH2'} `)
+  await smtpReply(connection, [235])
+}
+
+export async function verifySmtp(api: MailTransportApi, account: EmailAccount): Promise<void> {
+  const connection = new Connection(api, await api.network.open(accountEndpoint(account, 'smtp')))
+  try { await initializeSmtp(connection, account) } finally { await connection.close() }
+}
+
+export async function sendMail(api: MailTransportApi, account: EmailAccount, input: EmailSendInput, automatic?: { origin: string; messageId: string }): Promise<string> {
   const recipients = [...parseEmailAddresses(input.to, true), ...parseEmailAddresses(input.cc ?? '', true), ...parseEmailAddresses(input.bcc ?? '', true)]
   if (!recipients.length) throw new Error(t('email.backend.recipient'))
   const message = createMimeMessage()
@@ -305,27 +361,22 @@ export async function sendMail(api: MailTransportApi, account: EmailAccount, inp
   message.setRecipients(parseEmailAddresses(input.to, true).map((address) => ({ addr: address.address, name: address.name })))
   if (input.cc) message.setCc(parseEmailAddresses(input.cc, true).map((address) => ({ addr: address.address, name: address.name })))
   message.setSubject(input.subject)
-  const messageId = `<${crypto.randomUUID()}@${account.address.split('@')[1]}>`
+  const messageId = automatic?.messageId ?? `<${crypto.randomUUID()}@${account.address.split('@')[1]}>`
   message.setHeader('Message-ID', messageId)
-  if (input.inReplyTo) message.setHeader('In-Reply-To', input.inReplyTo)
+  if (automatic) {
+    if (!/^[a-f0-9-]{36}$/i.test(automatic.origin) || !/^<[^<>\s@]+@[^<>\s@]+>$/.test(messageId)) throw new Error(t('email.automatic.invalidProvenance'))
+    message.setHeader('Auto-Submitted', 'auto-generated')
+    message.setHeader('X-Valley-Origin', automatic.origin)
+  }
+  if (input.inReplyTo) {
+    message.setHeader('In-Reply-To', input.inReplyTo)
+    message.setHeader('References', input.inReplyTo)
+  }
   message.addMessage({ contentType: 'text/plain', data: input.text ?? '' })
   if (input.html) message.addMessage({ contentType: 'text/html', data: input.html })
   const connection = new Connection(api, await api.network.open(accountEndpoint(account, 'smtp')))
   try {
-    await smtpReply(connection, [220])
-    await connection.write('EHLO localhost\r\n')
-    let capabilities = await smtpReply(connection, [250])
-    if (!account.smtp.secure) {
-      await connection.write('STARTTLS\r\n'); await smtpReply(connection, [220]); await api.network.startTls(connection.id)
-      await connection.write('EHLO localhost\r\n'); capabilities = await smtpReply(connection, [250])
-    }
-    const auth = capabilities.filter((line) => /^250[ -]AUTH(?:=| )/i.test(line)).join(' ').toUpperCase()
-    if (account.provider === 'pureemail' && !/\bPLAIN\b/.test(auth) && /\bLOGIN\b/.test(auth)) {
-      await connection.write('AUTH LOGIN\r\n'); await smtpReply(connection, [334])
-      await connection.write(`${encodeBytes(encoder.encode(account.address))}\r\n`); await smtpReply(connection, [334])
-      await connection.password(account)
-    } else await connection.authenticate(account, 'smtp', `AUTH ${account.provider === 'pureemail' ? 'PLAIN' : 'XOAUTH2'} `)
-    await smtpReply(connection, [235])
+    await initializeSmtp(connection, account)
     await connection.write(`MAIL FROM:<${account.address}>\r\n`); await smtpReply(connection, [250])
     for (const recipient of recipients) { await connection.write(`RCPT TO:<${recipient.address}>\r\n`); await smtpReply(connection, [250, 251]) }
     await connection.write('DATA\r\n'); await smtpReply(connection, [354])

@@ -4,6 +4,7 @@ import { addressParser } from 'postal-mime'
 import type { EmailAddress, EmailMessageDetail, EmailMessageQuery, EmailMessageRef, EmailMessageSummary } from '../mailTypes'
 import type { DatasetPage, DatasetRecord, DatasetWhere } from '@valley/plugin-sdk/datasets'
 import { datasetRequest as request, ensureMembershipFlags, folderProjection, projectAssignments, queryAll, type EmailStoreContext } from './cache'
+import { readAutomationHeaders } from './automation'
 
 export function parseEmailAddresses(value: string, strict = false): EmailAddress[] {
   const parsed = addressParser(value, { flatten: true })
@@ -20,6 +21,7 @@ function summarize(row: DatasetRecord, memberships: DatasetRecord[]): EmailMessa
   const primary = memberships[0]
   const text = (key: string): string => typeof row[key] === 'string' ? row[key] as string : ''
   return {
+    ...(readAutomationHeaders(row.automationHeaders) ? { automationHeaders: readAutomationHeaders(row.automationHeaders) } : {}),
     id: text('id'), accountId: text('accountId'), folder: String(primary.folder), uid: Number(primary.uid), ...(typeof primary.uidValidity === 'number' ? { uidValidity: primary.uidValidity } : {}),
     memberships: memberships.map((item) => ({ accountId: text('accountId'), folder: String(item.folder), uid: Number(item.uid), ...(typeof item.uidValidity === 'number' ? { uidValidity: item.uidValidity } : {}) })),
     messageId: text('messageId'), from: text('from'), to: text('to'), cc: text('cc'), replyTo: text('replyTo'),

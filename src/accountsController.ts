@@ -39,6 +39,7 @@ export function createAccountsController(api: ValleyPluginApi, ports: AccountPor
           errors.push(`${ports.snapshot().accounts.find((account) => account.id === accountId)?.address || accountId}: ${result.error || uiText('email.loadFailed')}`)
           continue
         }
+        if (result.data.warning) errors.push(`${ports.snapshot().accounts.find((account) => account.id === accountId)?.address || accountId}: ${result.data.warning}`)
         const mailboxes = result.data.mailboxes.length ? result.data.mailboxes.filter((mailbox) => mailbox.selectable)
           : result.data.folders.map((path) => ({ path, name: path, selectable: true, cachedTotal: 0, cachedUnread: 0 }))
         mailboxesByAccount[accountId] = mailboxes

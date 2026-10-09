@@ -10,6 +10,22 @@ import { emailDisplaySettingsKey, readEmailDisplaySettings } from '../src/hooks'
 afterEach(cleanup)
 
 describe('Email Settings', () => {
+  it('tests the saved account independently of unsaved credential inputs', async () => {
+    const mock = createMockValleyApi({ manifest: { id: 'email' } })
+    mock.mail.listAccounts = async () => ({ ok: true, data: { accounts: [{ id: 'saved', provider: 'pureemail', address: 'mail@example.com', secretState: 'stored', imap: { host: 'imap.example.com', port: 993, secure: true }, smtp: { host: 'smtp.example.com', port: 465, secure: true }, createdAt: 0 }] } })
+    const test = vi.spyOn(mock.mail, 'testAccount').mockResolvedValue({ ok: true, data: { checkedAt: new Date().toISOString(), imap: { ok: false, error: 'Authentication failed' }, smtp: { ok: true } } })
+    const update = vi.spyOn(mock.mail, 'updateSmtpAccount'), send = vi.spyOn(mock.mail, 'sendEmail')
+    const dispose = register(mock.api); render(<Settings />)
+    await waitFor(() => expect(screen.getByText('Credentials saved')).toBeInTheDocument())
+    expect(screen.queryByText('connected')).toBeNull()
+    fireEvent.click(screen.getByText('mail@example.com'))
+    fireEvent.change(screen.getByLabelText('Password (or app password)'), { target: { value: 'unsaved-password' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Test connection' }))
+    await waitFor(() => expect(test).toHaveBeenCalledWith('saved'))
+    expect(await screen.findByText('IMAP: Authentication failed')).toBeInTheDocument(); expect(screen.getByText('SMTP: Authenticated')).toBeInTheDocument()
+    expect(screen.getByLabelText('Password (or app password)')).toHaveValue('unsaved-password')
+    expect(update).not.toHaveBeenCalled(); expect(send).not.toHaveBeenCalled(); dispose()
+  })
   it('submits a PureMail account through host Settings controls', async () => {
     const mock = createMockValleyApi({ manifest: { id: 'email' } })
     const submit = vi.spyOn(mock.mail, 'addSmtpAccount')
@@ -52,7 +68,7 @@ describe('Email Settings', () => {
     dispose()
   })
 
-  it('lists mailboxes as full-bleed rows and opens one as a detail page', async () => {
+  it.each(['ok', 'stored'] as const)('keeps %s mailboxes editable through save and remount', async secretState => {
     const mock = createMockValleyApi({ manifest: { id: 'email' } })
     mock.mail.listAccounts = async () => ({
       ok: true,
@@ -69,6 +85,7 @@ describe('Email Settings', () => {
           {
             id: 'p1',
             provider: 'pureemail',
+            secretState,
             address: 'mailbox@example.com',
             imap: { host: 'imap.example.com', port: 993, secure: true },
             smtp: { host: 'smtp.example.com', port: 465, secure: true },
@@ -87,6 +104,7 @@ describe('Email Settings', () => {
     // and one hairline row per mailbox.
     await waitFor(() => expect(container.querySelectorAll('.settings-list-row')).toHaveLength(2))
     expect(container.querySelector('.settings-listpage-header')).not.toBeNull()
+    if (secretState === 'stored') expect(screen.getByText('Credentials saved')).toBeInTheDocument()
 
     fireEvent.click(screen.getByText('mailbox@example.com'))
     expect(screen.getByRole('button', { name: 'Remove account' })).toBeTruthy()
@@ -129,6 +147,29 @@ describe('Email Settings', () => {
     expect(readEmailDisplaySettings('new')).toEqual({ htmlContent: true, remoteImages: true })
     expect(readEmailDisplaySettings('invalid')).toEqual({ htmlContent: true, remoteImages: true })
     expect(readEmailDisplaySettings('off')).toEqual({ htmlContent: false, remoteImages: false })
+    dispose()
+  })
+
+  it('reconnects an existing mailbox with blank password input and preserves its identity', async () => {
+    const mock = createMockValleyApi({ manifest: { id: 'email' } })
+    mock.mail.listAccounts = async () => ({ ok: true, data: { accounts: [{ id: 'existing', provider: 'pureemail', address: 'mail@example.com', login: 'saved-user', imap: { host: 'imap.example.com', port: 993, secure: true }, smtp: { host: 'smtp.example.com', port: 465, secure: true }, createdAt: 0 }] } })
+    const reconnect = vi.spyOn(mock.mail, 'updateSmtpAccount').mockResolvedValue({ ok: true })
+    const add = vi.spyOn(mock.mail, 'addSmtpAccount'), remove = vi.spyOn(mock.mail, 'removeAccount')
+    const dispose = register(mock.api)
+    render(<Settings />)
+    await waitFor(() => expect(screen.getByText('mail@example.com')).toBeInTheDocument())
+    fireEvent.click(screen.getByText('mail@example.com'))
+    expect(screen.getByRole('textbox', { name: 'Email address' })).toHaveValue('mail@example.com')
+    expect(screen.getByRole('textbox', { name: 'Login / username' })).toHaveValue('saved-user')
+    expect(screen.getByLabelText('Password (or app password)')).toHaveValue('')
+    expect(screen.getByRole('button', { name: 'Save and reconnect' })).toBeDisabled()
+    fireEvent.change(screen.getByRole('textbox', { name: 'Login / username' }), { target: { value: 'updated-user' } })
+    fireEvent.change(screen.getByLabelText('Password (or app password)'), { target: { value: 'new-secret' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save and reconnect' }))
+    await waitFor(() => expect(reconnect).toHaveBeenCalledWith({ accountId: 'existing', address: 'mail@example.com', login: 'updated-user', password: 'new-secret' }))
+    await waitFor(() => expect(screen.getByLabelText('Password (or app password)')).toHaveValue(''))
+    expect(add).not.toHaveBeenCalled()
+    expect(remove).not.toHaveBeenCalled()
     dispose()
   })
 })

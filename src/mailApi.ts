@@ -15,6 +15,8 @@ export function mailApi(api: { backend: Pick<ValleyPluginApi['backend'], 'call' 
     parseAddresses: (value) => call('parseAddresses', { value }),
     listAccounts: () => call('listAccounts', {}),
     addSmtpAccount: (input) => call('addSmtpAccount', input),
+    updateSmtpAccount: (input) => call('updateSmtpAccount', input),
+    testAccount: (accountId, cancellation) => api.backend.callOperation ? api.backend.callOperation('command.testAccount', { accountId }, { cancellation }) : call('testAccount', { accountId }),
     removeAccount: (accountId) => call('removeAccount', { accountId }),
     listFolders: (accountId) => call('listFolders', { accountId }),
     syncFolder: (accountId, folder, limit) => call('syncFolder', { accountId, folder, limit }),

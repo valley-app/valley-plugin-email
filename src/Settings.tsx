@@ -2,7 +2,7 @@ import { OrganizationSettings } from './Organization'
 import { mailApi } from './mailApi'
 import { React, api } from './runtime'
 import type { FC, ReactNode } from 'react'
-import type { EmailAccount } from './mailTypes'
+import type { EmailAccount, EmailConnectionResult } from './mailTypes'
 import { emailDisplaySettingsKey, readEmailDisplaySettings, useEmail, useEmailDisplaySettings, type EmailDisplaySettings } from './hooks'
 import { ChevronLeft, ChevronRight, Google, Mail, Microsoft, Plus, Trash, Warning } from './icons'
 import { uiText } from './localization'
@@ -107,9 +107,11 @@ const AccountGlyph: FC<{ account: EmailAccount; large?: boolean }> = ({ account,
 
 /** The short state word on a row — what the user must do next, if anything. */
 function badgeFor(account: EmailAccount): { label: string; ok: boolean } {
-  if (account.provider !== 'pureemail') return { label: uiText('auto.e2262d7a63f5'), ok: true }
-  if (account.secretState === 'unreadable') return { label: 'reconnect', ok: false }
-  return { label: 'connected', ok: true }
+  if (account.secretState === 'stored') return { label: uiText('credentials.saved'), ok: false }
+  if (account.secretState === 'unreadable') return { label: uiText('credentials.unreadable'), ok: false }
+  if (account.secretState === 'ok') return { label: uiText('credentials.available'), ok: false }
+  if (account.secretState === 'absent') return { label: uiText('credentials.missing'), ok: false }
+  return { label: uiText('credentials.unchecked'), ok: false }
 }
 
 const AccountRow: FC<{ account: EmailAccount; onOpen: () => void }> = ({ account, onOpen }) => {
@@ -179,6 +181,8 @@ const AccountDetail: FC<{ account: EmailAccount; onBack: () => void; onRemove: (
 
     {account.provider === 'pureemail' ? (
       <>
+        <AccountCredentials account={account} />
+        <AccountConnectionTest account={account} />
         <HostRow title={uiText('auto.b53c37515b60')} value={account.imap.host} />
         <HostRow title={uiText('auto.07f3793882a2')} value={String(account.imap.port)} />
         <HostRow title={uiText('auto.2d4a434baeea')} value={account.smtp.host} />
@@ -229,6 +233,64 @@ const HostRow: FC<{ title: string; value: string }> = ({ title, value }) => (
     <ReadOnlyValue value={value} ariaLabel={title} monospace />
   </SettingsRow>
 )
+
+const AccountCredentials: FC<{ account: EmailAccount }> = ({ account }) => {
+  const { store } = useEmail()
+  const [address, setAddress] = React.useState(account.address)
+  const [login, setLogin] = React.useState(account.login || account.address)
+  const [password, setPassword] = React.useState('')
+  const [busy, setBusy] = React.useState(false)
+  const [message, setMessage] = React.useState('')
+  const [failed, setFailed] = React.useState(false)
+  const { TextField } = api.ui.settings
+  const save = async (): Promise<void> => {
+    setBusy(true)
+    setMessage('')
+    setFailed(false)
+    try {
+      const result = await mailApi(api).updateSmtpAccount({ accountId: account.id, address: address.trim(), login: login.trim(), password })
+      setFailed(!result.ok)
+      setMessage(result.ok ? uiText('email.settings.reconnected') : result.error || uiText('email.settings.reconnectFailed'))
+      await store.refreshAccounts()
+    } catch {
+      setFailed(true)
+      setMessage(uiText('email.settings.reconnectFailed'))
+    } finally {
+      setPassword('')
+      setBusy(false)
+    }
+  }
+  return <>
+    <Field title={uiText('auto.c94d3175a656')}><TextField value={address} onChange={setAddress} ariaLabel={uiText('auto.c94d3175a656')} disabled={busy} /></Field>
+    <Field title={uiText('email.settings.login')}><TextField value={login} onChange={setLogin} ariaLabel={uiText('email.settings.login')} disabled={busy} /></Field>
+    <Field title={uiText('auto.b78ff3963178')}><TextField type="password" value={password} onChange={setPassword} ariaLabel={uiText('auto.b78ff3963178')} disabled={busy} placeholder={uiText('email.settings.passwordPlaceholder')} /></Field>
+    <div className="settings-row-actions"><Button variant="primary" disabled={busy || !address.trim() || !login.trim() || !password} onClick={() => { void save() }}>{busy ? uiText('auto.691f4302fccf') : uiText('email.settings.saveReconnect')}</Button></div>
+    {message && <div role="status" className={failed ? 'email-error' : 'settings-description'}>{message}</div>}
+  </>
+}
+
+const AccountConnectionTest: FC<{ account: EmailAccount }> = ({ account }) => {
+  const [busy, setBusy] = React.useState(false)
+  const [result, setResult] = React.useState<EmailConnectionResult | undefined>()
+  const cancellation = React.useRef<AbortController | undefined>()
+  React.useEffect(() => () => { cancellation.current?.abort() }, [])
+  const test = async (): Promise<void> => {
+    cancellation.current?.abort()
+    const controller = new AbortController(); cancellation.current = controller
+    setBusy(true); setResult(undefined)
+    try { const result = await mailApi(api).testAccount(account.id, controller.signal); if (!controller.signal.aborted) setResult(result) }
+    catch { if (!controller.signal.aborted) setResult({ ok: false, error: uiText('email.settings.connectionFailed') }) }
+    finally { if (!controller.signal.aborted) setBusy(false) }
+  }
+  return <>
+    <SettingsRow title={uiText('email.settings.testConnection')} description={uiText('email.settings.testConnectionDescription')}>
+      <Button disabled={busy} onClick={() => { void test() }}>{uiText(busy ? 'email.settings.connectionChecking' : 'email.settings.testConnection')}</Button>
+    </SettingsRow>
+    {result && <div role="status" className="settings-description">
+      {result.data ? <>{(['imap', 'smtp'] as const).map(kind => <div key={kind} className={result.data![kind].ok ? '' : 'email-error'}>{kind.toUpperCase()}: {result.data![kind].ok ? uiText('email.settings.connectionOk') : result.data![kind].error || uiText('email.settings.connectionFailed')}</div>)}</> : <span className="email-error">{result.error || uiText('email.settings.connectionFailed')}</span>}
+    </div>}
+  </>
+}
 
 const SmtpForm: FC<{ onAdded: () => void }> = ({ onAdded }) => {
   const [address, setAddress] = React.useState('')

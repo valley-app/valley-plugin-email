@@ -19,7 +19,7 @@ export async function identifyMessage(accountId: string, folder: string, message
   const contentRevision = await digest(JSON.stringify([
     addresses(message.from), addresses(message.to), addresses(message.cc), addresses(message.bcc), addresses(message.replyTo),
     message.originalDate === undefined ? message.date || null : message.originalDate,
-    message.subject, body(message.text), body(message.html), message.attachmentDigests ?? []
+    message.subject, body(message.text), body(message.html), message.attachmentDigests ?? [], ...(message.automationHeaders ? [message.automationHeaders] : [])
   ]))
   const complete = message.complete !== false && (message.text !== undefined || message.html !== undefined || message.complete === true) && (!message.hasAttachments || message.attachmentDigests !== undefined)
   const identity = complete ? [normalizedMessageId(message.messageId), contentRevision] : ['incomplete', folder, message.uidValidity ?? null, message.uid, contentRevision]

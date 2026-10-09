@@ -1,3 +1,4 @@
+import Ajv from 'ajv'
 import { readdirSync, readFileSync as readStyleFile } from 'node:fs'
 import { join as joinStylePath } from 'node:path'
 import { DEFAULT_PALETTE } from '@valley/plugin-sdk/palette'
@@ -24,9 +25,17 @@ describe('package host contracts', () => {
     const mock = createMockValleyApi({ manifest: declared, indexEntries: [{ relPath: 'Unrelated.md', title: 'Unrelated', kind: 'note', mtimeMs: 1 }] })
     const observe = vi.spyOn(mock.api.index, 'observe')
     expect(mock.api.getState().indexEntries).toEqual([])
+    const registered = vi.spyOn(mock.api.commands, 'register')
     const dispose = plugin.register(mock.api)
     try {
       await Promise.resolve()
+      const validator = new Ajv({ strict: false })
+      const specs = registered.mock.calls.map(([spec]) => spec as typeof spec & { outputSchema?: Record<string, unknown> })
+      expect(specs.length).toBeGreaterThan(0)
+      for (const spec of specs) {
+        expect(spec.outputSchema, spec.id).toBeDefined()
+        expect(() => validator.compile(spec.outputSchema!), spec.id).not.toThrow()
+      }
       const commands = mock.api.commands.list()
       expect(commands.length, `${id} did not register its commands`).toBeGreaterThan(0)
       expect(commands.filter((command) => command.acceptsInput && !command.inputSchema).map((command) => command.id)).toEqual([])
@@ -63,6 +72,54 @@ describe('package host contracts', () => {
       if (Object.keys(declared.fileViews ?? {}).length) expect(surfaces).toContain('main_workspace')
       if (properties.some(({ extension }) => extension.pluginSurfaces?.includes('main_workspace'))) expect(surfaces).toContain('main_workspace')
       expect(new Set(commands.map((command) => command.id)).size).toBe(commands.length)
+    } finally { dispose() }
+  })
+  it('lists close-compose in every guard preset and denies every mailbox window command when blocked', async () => {
+    const mock = createMockValleyApi({ manifest: declared })
+    const dispose = plugin.register(mock.api)
+    try {
+      await Promise.resolve()
+      const windowCommands = ['compose', 'close-compose', 'open-mailbox', 'sync']
+      const registered = mock.api.commands.list().map((command) => command.id.slice(id.length + 1)).filter((command) => windowCommands.includes(command))
+      expect(registered.sort()).toEqual([...windowCommands].sort())
+      const presets = config.guardPresets.presets as Array<{ id: string; entries: { commands: Record<string, { decision: string }> } }>
+      for (const preset of presets) expect(preset.entries.commands['close-compose'], preset.id).toBeDefined()
+      const blocked = presets.find((preset) => preset.id === 'blocked')!
+      expect(registered.filter((command) => blocked.entries.commands[command]?.decision !== 'deny')).toEqual([])
+    } finally { dispose() }
+  })
+  it('names every registered command in each guard preset and keeps agent-tool mirrors on their tool decision', async () => {
+    const mock = createMockValleyApi({ manifest: declared })
+    const register = vi.spyOn(mock.api.commands, 'register')
+    const dispose = plugin.register(mock.api)
+    try {
+      await Promise.resolve()
+      type Declaration = { id: string; effect: string }
+      const services = (config as unknown as { runtime: { services: Array<{ metadata?: { command?: Declaration; commands?: Declaration[] } }> } }).runtime.services
+      const backend = services.flatMap((service) => service.metadata?.commands ?? (service.metadata?.command ? [service.metadata.command] : []))
+        .map((command) => ({ id: command.id, sideEffect: command.effect === 'read' ? 'read' : 'write' }))
+      const commands = [...register.mock.calls.map(([command]) => ({ id: command.id.startsWith(`${id}:`) ? command.id.slice(id.length + 1) : command.id, sideEffect: command.sideEffect })), ...backend]
+      expect(new Set(commands.map((command) => command.id)).size).toBe(commands.length)
+      expect(commands.map((command) => command.id)).toEqual(expect.arrayContaining(['read-inbox', 'search-email-messages', 'read-mail-message', 'list-mail-accounts', 'list-mail-folders', 'open-selection', 'update-properties']))
+      expect(backend.map((command) => command.id)).toEqual(expect.arrayContaining(['listAccounts', 'readFolder', 'readMessage', 'queryMessages', 'parseAddresses', 'testAccount', 'listFolders', 'addSmtpAccount', 'removeAccount', 'syncFolder', 'sendEmail', 'applyMessageAction']))
+      type Entry = { decision: string; allowPreApproval?: boolean }
+      const presets = config.guardPresets.presets as Array<{ id: string; entries: { commands: Record<string, Entry>; tools: Record<string, Entry> } }>
+      for (const preset of presets) {
+        expect(commands.filter((command) => !preset.entries.commands[command.id]).map((command) => command.id), preset.id).toEqual([])
+        for (const tool of Object.keys(preset.entries.tools)) expect(preset.entries.commands[tool.replaceAll('_', '-')], `${preset.id}:${tool}`).toEqual(preset.entries.tools[tool])
+      }
+      const byId = Object.fromEntries(presets.map((preset) => [preset.id, preset.entries.commands]))
+      expect(commands.filter((command) => byId.blocked[command.id].decision !== 'deny').map((command) => command.id)).toEqual([])
+      expect(['compose', 'compose-email', 'reply-to-email', 'forward-email', 'update-email-message', 'update-properties'].filter((command) => byId['read-only'][command].decision !== 'deny')).toEqual([])
+      expect(commands.filter((command) => command.sideEffect === 'read' && byId['read-only'][command.id].decision === 'deny').map((command) => command.id)).toEqual([])
+      expect(byId.recommended['read-inbox']).toEqual({ decision: 'confirm', allowPreApproval: false })
+      for (const command of ['addSmtpAccount', 'removeAccount', 'sendEmail', 'applyMessageAction']) {
+        expect(byId['read-only'][command], `read-only:${command}`).toEqual({ decision: 'deny' })
+        expect(byId.recommended[command], `recommended:${command}`).toEqual({ decision: 'confirm', allowPreApproval: false })
+      }
+      expect(byId.recommended.readFolder).toEqual(byId.recommended['read-inbox'])
+      expect(byId.recommended.readMessage).toEqual(byId.recommended['read-mail-message'])
+      expect(byId.recommended.queryMessages).toEqual(byId.recommended['search-email-messages'])
     } finally { dispose() }
   })
   it('owns and disposes its stylesheet in every theme', () => {

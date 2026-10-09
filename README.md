@@ -18,6 +18,10 @@ Automatic grouping is opt-in and applies to newly arrived, unread, non-spam Inbo
 
 Categories never move messages or change spam status. Manual category assignments remain durable across cache rebuilds and block in-flight automatic results until Reset to automatic. Queue records contain identifiers and progress; provider input includes sender, subject, and normalized body without attachments or remote images. Interrupted or ambiguous requests require an explicit action before retrying.
 
+## Automatic sends
+
+Automatic sends inherit authenticated host causation. Email sets `Auto-Submitted` and its opaque origin header itself and retains a durable receipt before contacting SMTP; uncertain or completed attempts are not replayed. Automatic replies require complete, verified incoming headers and refuse automated, bulk, list, suppressed, or uncertain messages. Manual composing remains unchanged. Incoming header observations are retained through an additive cache migration; old messages without these observations need a fresh sync before automatic replies.
+
 ## Package
 
 - `manifest.json`: readable English identity, version, and paired `author` / `authorUrl` arrays.
@@ -42,3 +46,9 @@ npm run check
 The check validates types and package boundaries, runs the package tests, and rebuilds `runtime/`. It requires no Valley source checkout. Keep the rebuilt runtime, locale files, dependency lock, and vendored tools with each release. Increment the package and manifest versions together.
 
 Valley release maintainers explicitly import the compiled artifact into the application’s `plugins.lock.json`; building Valley does not build or read this repository. All privileged work uses declared SDK capabilities, authenticated IPC, and explicit grants. Disabling or unloading the plugin releases its subscriptions and resources.
+
+## Workflow integration
+
+The backend explicitly registers its supported blocks through `registerWorkflowContribution`. Workflow calls the owning operations with their original authentication, cancellation, grants, revisions, and receipts. The catalogue publishes Draft-07 parameter and port contracts; credential administration and approval bypasses are excluded. Workflow availability is configured separately in Workflow → Plugins. Existing account, connection, and profile settings remain owned by this plugin.
+
+Workflow output collections are explicit: `listAccounts` → `$.accounts`, `listFolders` → `$.mailboxes`, `readFolder` → `$.messages`, `queryMessages` → `$.messages`, `parseAddresses` → `$.addresses`, `applyMessageAction` → `$.messages`. Selectors are relative to each execution item’s `json`. Folder listing deliberately selects structured mailboxes rather than the duplicate folder-name aliases. Message reads and message actions select the returned message list; single-message headers, addresses and attachment metadata remain attributes.

@@ -1,5 +1,5 @@
-import { describe, expect, it, vi } from 'vitest'
-import { applyMessageAction, decodeMailbox, encodeMailbox, fetchFolder, listFolders, parseImapResponse, sendMail, verifyImap, type MailTransportApi } from '../src/backend/transport'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { applyMessageAction, decodeMailbox, encodeMailbox, fetchFolder, listFolders, parseImapResponse, parseMail, sendMail, verifyImap, verifySmtp, type MailTransportApi } from '../src/backend/transport'
 import type { EmailAccount } from '../src/mailTypes'
 import { decodeBytes, encodeBytes } from '../src/backend/encoding'
 
@@ -17,22 +17,90 @@ function transport(replies: string, chunkSize = 7) {
       write: vi.fn(async (_id, base64) => { writes.push(new TextDecoder().decode(decodeBytes(base64))) }),
       startTls: vi.fn(async () => undefined), close: vi.fn(async () => undefined)
     },
-    credentials: { state: vi.fn(), set: vi.fn(), delete: vi.fn(), handle: vi.fn(async () => 'secret-handle'), write: vi.fn(async () => undefined) },
+    credentials: { presence: vi.fn(async () => 'stored' as const), state: vi.fn(), set: vi.fn(), delete: vi.fn(), handle: vi.fn(async () => 'secret-handle'), write: vi.fn(async () => undefined) },
     accounts: { list: vi.fn(), authorize: vi.fn(async () => 'oauth-handle') }
   }
   return { api, writes }
 }
 
 const login = (capabilities = 'IMAP4rev1 AUTH=PLAIN MOVE UIDPLUS') => `* OK ready\r\n* CAPABILITY ${capabilities}\r\nV1 OK capabilities\r\n+ \r\nV2 OK authenticated\r\n`
+afterEach(() => vi.useRealTimers())
 
 describe('package-owned IMAP and SMTP', () => {
+  it('yields inside one MIME parse without changing Unicode text or attachments', async () => {
+    vi.useFakeTimers()
+    const timer = vi.spyOn(globalThis, 'setTimeout')
+    const decode = vi.spyOn(TextDecoder.prototype, 'decode')
+    const lines = 2048
+    const raw = new TextEncoder().encode('From: fixture@example.test\r\nTo: recipient@example.test\r\nSubject: Grüsse\r\nMIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary="fixture"\r\n\r\n--fixture\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nä ö ü\r\n--fixture\r\nContent-Type: application/octet-stream\r\nContent-Disposition: attachment; filename="synthetic.bin"\r\nContent-Transfer-Encoding: base64\r\n\r\n' + `${'A'.repeat(76)}\r\n`.repeat(lines) + '--fixture--\r\n')
+    let completed = false
+    const parsed = parseMail(raw).then(value => { completed = true; return value })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(completed).toBe(false)
+    await vi.runAllTimersAsync()
+    const value = await parsed
+    expect(value).toMatchObject({ subject: 'Grüsse', text: 'ä ö ü\n', attachments: [{ filename: 'synthetic.bin' }] })
+    const content = value.attachments[0].content
+    expect(typeof content === 'string' ? content.length : content.byteLength).toBe(lines * 57)
+    expect(timer.mock.calls.filter(([, delay]) => delay === 0).length).toBeGreaterThanOrEqual(lines / 32)
+    expect(decode.mock.calls.filter(([input]) => input && ArrayBuffer.isView(input)).every(([input]) => (input as Uint8Array).buffer.byteLength === (input as Uint8Array).byteLength)).toBe(true)
+    timer.mockRestore()
+    decode.mockRestore()
+  })
+  it('waits between empty socket reads and bounds consecutive empty responses', async () => {
+    vi.useFakeTimers()
+    const fixture = transport('')
+    vi.mocked(fixture.api.network.read).mockResolvedValue({ base64: '', done: false })
+    const result = verifyImap(fixture.api, account)
+    const rejection = expect(result).rejects.toThrow('repeatedly returned no data')
+    await vi.advanceTimersByTimeAsync(0)
+    expect(fixture.api.network.read).toHaveBeenCalledOnce()
+    await vi.advanceTimersByTimeAsync(80)
+    await rejection
+    expect(fixture.api.network.read).toHaveBeenCalledTimes(9)
+    expect(fixture.api.network.close).toHaveBeenCalledOnce()
+  })
+  it('yields between buffered IMAP reply batches', async () => {
+    vi.useFakeTimers()
+    const fixture = transport(`${login()}${Array.from({ length: 65 }, (_, index) => `* ${index} EXISTS\r\n`).join('')}V3 OK examined\r\n`, 65536)
+    let completed = false
+    const result = verifyImap(fixture.api, account).then(() => { completed = true })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(completed).toBe(false)
+    await vi.runAllTimersAsync()
+    await result
+    expect(completed).toBe(true)
+  })
+  it('tests saved IMAP and SMTP credentials without reading or sending messages', async () => {
+    const imap = transport(`${login()}V3 OK examined\r\n`)
+    await verifyImap(imap.api, { ...account, login: 'saved-login' })
+    expect(imap.writes.join('')).toContain('EXAMINE "INBOX"')
+    expect(imap.writes.join('')).not.toMatch(/SELECT|FETCH|STORE|COPY|MOVE/)
+    expect(imap.api.credentials.write).toHaveBeenCalledWith('socket', ['\0saved-login\0', { credential: 'secret-handle' }], expect.any(Object))
+    const smtp = transport('220 ready\r\n250 AUTH PLAIN\r\n235 2.7.0 authenticated\r\n')
+    await verifySmtp(smtp.api, { ...account, login: 'saved-login' })
+    expect(smtp.writes.join('')).not.toMatch(/MAIL FROM|RCPT TO|DATA/)
+    expect(smtp.api.credentials.write).toHaveBeenCalledWith('socket', ['\0saved-login\0', { credential: 'secret-handle' }], expect.objectContaining({ prefix: 'AUTH PLAIN ' }))
+    expect(smtp.api.network.close).toHaveBeenCalledOnce()
+  })
+  it('preserves a tagged IMAP authentication rejection before the server challenge', async () => {
+    const fixture = transport('* OK ready\r\n* CAPABILITY IMAP4rev1 AUTH=PLAIN\r\nV1 OK caps\r\nV2 NO [AUTHENTICATIONFAILED] Login denied\r\n')
+    await expect(verifyImap(fixture.api, account)).rejects.toThrow('[AUTHENTICATIONFAILED] Login denied')
+    expect(fixture.api.credentials.write).not.toHaveBeenCalled(); expect(fixture.api.network.close).toHaveBeenCalledOnce()
+  })
+  it('retains SMTP status codes when saved authentication fails', async () => {
+    const fixture = transport('220 ready\r\n250 AUTH PLAIN\r\n535 5.7.8 Authentication credentials invalid\r\n')
+    await expect(verifySmtp(fixture.api, account)).rejects.toThrow('535 5.7.8 Authentication credentials invalid')
+    expect(fixture.writes.join('')).not.toMatch(/MAIL FROM|DATA/)
+  })
   it('decodes fragmented literal MIME data and keeps per-folder UIDs and flags', async () => {
-    const mime = 'From: "Canopy" <canopy@example.test>\r\nTo: sender@example.test\r\nSubject: =?UTF-8?B?R3LDvHNzZQ==?=\r\nMessage-ID: <first@example.test>\r\nDate: Wed, 9 Sep 2026 10:00:00 +0000\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nGrüsse aus dem Wald'
+    const mime = 'From: "Canopy" <canopy@example.test>\r\nTo: sender@example.test\r\nSubject: =?UTF-8?B?R3LDvHNzZQ==?=\r\nMessage-ID: <first@example.test>\r\nAuto-Submitted: auto-generated\r\nX-Valley-Origin: origin-fixture\r\nDate: Wed, 9 Sep 2026 10:00:00 +0000\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nGrüsse aus dem Wald'
     const wire = `${login()}* 10 EXISTS\r\nV3 OK selected\r\n* 10 FETCH (UID 72 FLAGS (\\Seen \\Flagged) BODY[] {${new TextEncoder().encode(mime).length}}\r\n${mime})\r\nV4 OK fetched\r\n`
     const fixture = transport(wire)
     const { messages } = await fetchFolder(fixture.api, account, 'INBOX', 4)
     expect(messages).toHaveLength(1)
     expect(messages[0]).toMatchObject({ uid: 72, messageId: '<first@example.test>', subject: 'Grüsse', text: 'Grüsse aus dem Wald\n', flags: ['\\Seen', '\\Flagged'] })
+    expect(messages[0].automationHeaders).toMatchObject({ observed: true, autoSubmitted: ['auto-generated'], origin: ['origin-fixture'] })
     expect(fixture.writes.join('')).toContain('FETCH 7:* (UID FLAGS INTERNALDATE BODY.PEEK[])')
     expect(fixture.api.credentials.write).toHaveBeenCalledWith('socket', ['\0sender@example.test\0', { credential: 'secret-handle' }], { encoding: 'base64', prefix: '', suffix: '\r\n' })
     expect(fixture.writes.join('')).not.toContain('secret-handle')
@@ -88,12 +156,14 @@ describe('package-owned IMAP and SMTP', () => {
 
   it('sends MIME through TLS with envelope Bcc recipients and no Bcc header', async () => {
     const fixture = transport('220 ready\r\n250-localhost\r\n250 STARTTLS\r\n220 TLS\r\n250-localhost\r\n250 AUTH PLAIN LOGIN\r\n235 authenticated\r\n250 sender\r\n250 to\r\n250 bcc\r\n354 send data\r\n250 accepted\r\n')
-    const messageId = await sendMail(fixture.api, { ...account, smtp: { ...account.smtp, secure: false } }, { accountId: account.id, to: 'To <to@example.test>', bcc: 'blind@example.test', subject: 'Grüsse', text: 'Hello\n.leading dot', html: '<p>Grüsse</p>' })
+    const messageId = await sendMail(fixture.api, { ...account, smtp: { ...account.smtp, secure: false } }, { accountId: account.id, to: 'To <to@example.test>', bcc: 'blind@example.test', subject: 'Grüsse', text: 'Hello\n.leading dot', html: '<p>Grüsse</p>', inReplyTo: '<request@example.test>' })
     const wire = fixture.writes.join('')
     expect(messageId).toMatch(/^<.+@example\.test>$/)
     expect(wire).toContain('RCPT TO:<blind@example.test>')
     expect(wire).not.toMatch(/^Bcc:/im)
     expect(wire).toContain('multipart/alternative')
+    expect(wire).toMatch(/^In-Reply-To: <request@example.test>$/im)
+    expect(wire).toMatch(/^References: <request@example.test>$/im)
     expect(wire).toContain('\r\n.\r\n')
     expect(fixture.api.network.startTls).toHaveBeenCalled()
     expect(fixture.api.credentials.write).toHaveBeenCalledWith('socket', expect.any(Array), expect.objectContaining({ prefix: 'AUTH PLAIN ' }))
@@ -104,5 +174,16 @@ describe('package-owned IMAP and SMTP', () => {
     await expect(verifyImap(fixture.api, account)).rejects.toThrow('authentication failed')
     expect(fixture.api.network.close).toHaveBeenCalledTimes(1)
     expect(fixture.writes.join('')).not.toContain('SELECT')
+  })
+
+  it('sets automatic headers only from the backend-owned provenance argument', async () => {
+    const fixture = transport('220 ready\r\n250 AUTH PLAIN\r\n235 authenticated\r\n250 sender\r\n250 recipient\r\n354 data\r\n250 accepted\r\n')
+    const origin = '11111111-1111-4111-8111-111111111111'
+    await sendMail(fixture.api, account, { accountId: account.id, to: 'fern@example.test', subject: 'Canopy', text: 'Fern', ...{ headers: { 'Auto-Submitted': 'no', 'X-Valley-Origin': 'forged' } } }, { origin, messageId: '<automated@example.test>' })
+    const wire = fixture.writes.join('')
+    expect(wire).toMatch(/^Auto-Submitted: auto-generated$/im)
+    expect(wire).toMatch(new RegExp(`^X-Valley-Origin: ${origin}$`, 'im'))
+    expect(wire).toContain('Message-ID: <automated@example.test>')
+    expect(wire).not.toContain('forged')
   })
 })

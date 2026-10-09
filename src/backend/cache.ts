@@ -3,6 +3,7 @@ import type { PluginDataApi } from '@valley/plugin-sdk'
 import type { CachedMessage, EmailAccount } from '../mailTypes'
 import type { DatasetPage, DatasetRecord, DatasetRequest, DatasetTransactionOperation, DatasetWhere } from '@valley/plugin-sdk/datasets'
 import { identifyMessage } from './identity'
+import { readAutomationHeaders } from './automation'
 
 export interface EmailStoreContext {
   data: PluginDataApi
@@ -32,6 +33,9 @@ export async function queryAll(scope: EmailStoreContext, dataset: string, where?
   } while (cursor)
   return rows
 }
+
+const canonicalFlags = (flags: readonly unknown[]): string[] => [...new Set(flags.filter((flag): flag is string => typeof flag === 'string'))].sort()
+const sameFlags = (left: unknown, right: unknown): boolean => JSON.stringify(canonicalFlags(Array.isArray(left) ? left : [])) === JSON.stringify(canonicalFlags(Array.isArray(right) ? right : []))
 
 function flagProjection(flags: readonly string[]) {
   return { unread: !flags.includes('\\Seen'), flagged: flags.includes('\\Flagged') }
@@ -76,6 +80,7 @@ function messageRow(accountId: string, message: CachedMessage): DatasetRecord {
   return {
     id: message.logicalId!, accountId, messageId: message.messageId,
     contentRevision: message.contentRevision ?? null, complete: message.complete === true, originalDate: message.originalDate === undefined ? message.date || null : message.originalDate,
+    automationHeaders: message.automationHeaders ? { ...message.automationHeaders } : null,
     sortDate: message.date || '', projectionVersion: 1,
     from: message.from, replyTo: message.replyTo ?? null, to: message.to, cc: message.cc ?? null,
     subject: message.subject, date: message.date || '1970-01-01T00:00:00.000Z', snippet: message.snippet,
@@ -112,8 +117,8 @@ function folderOperations(
     }),
     ...[...after.values()].filter((message) => {
       const existing = before.get(message.uid)
-      return !existing || existing.logicalId !== message.logicalId || JSON.stringify(existing.flags) !== JSON.stringify(message.flags)
-    }).map((message) => ({ dataset: scope.datasets.folderMessages, operation: 'upsert' as const, values: { accountId, folder, uid: message.uid, messageId: message.logicalId!, uidValidity: message.uidValidity ?? null, flags: message.flags, ...flagProjection(message.flags), ...folderProjection(folder, undefined, message.flags) } }))
+      return !existing || existing.logicalId !== message.logicalId || !sameFlags(existing.flags, message.flags)
+    }).map((message) => { const flags = canonicalFlags(message.flags); return { dataset: scope.datasets.folderMessages, operation: 'upsert' as const, values: { accountId, folder, uid: message.uid, messageId: message.logicalId!, uidValidity: message.uidValidity ?? null, flags, ...flagProjection(flags), ...folderProjection(folder, undefined, flags) } } })
   ]
 }
 
@@ -181,6 +186,7 @@ export async function readFolder(scope: EmailStoreContext, accountId: string, fo
       if (!message) return []
       return [{
         complete: message.complete === true, logicalId: String(message.id), contentRevision: typeof message.contentRevision === 'string' ? message.contentRevision : undefined,
+        ...(readAutomationHeaders(message.automationHeaders) ? { automationHeaders: readAutomationHeaders(message.automationHeaders) } : {}),
         uidValidity: typeof membership.uidValidity === 'number' ? membership.uidValidity : undefined,
         originalDate: typeof message.originalDate === 'string' ? message.originalDate : null,
         uid: Number(membership.uid), messageId: String(message.messageId), from: String(message.from),
@@ -236,9 +242,12 @@ export async function updateMessageFlags(
 ): Promise<CachedMessage[]> {
   const membership = await scope.data.dataset(scope.datasets.folderMessages).get({ accountId, folder, uid })
   if (!membership) return []
-  const flags = new Set(Array.isArray(membership.flags) ? membership.flags as string[] : [])
-  add.forEach(flag => flags.add(flag)); remove.forEach(flag => flags.delete(flag))
-  if (JSON.stringify([...flags]) !== JSON.stringify(membership.flags)) await scope.data.transaction([{ operation: 'update', dataset: scope.datasets.folderMessages, key: { accountId, folder, uid }, values: { flags: [...flags], ...flagProjection([...flags]) } }])
+  const stored = Array.isArray(membership.flags) ? membership.flags as string[] : []
+  const next = new Set(stored)
+  add.forEach(flag => next.add(flag)); remove.forEach(flag => next.delete(flag))
+  const changed = !sameFlags(stored, [...next])
+  const flags = changed ? canonicalFlags([...next]) : stored
+  if (changed) await scope.data.transaction([{ operation: 'update', dataset: scope.datasets.folderMessages, key: { accountId, folder, uid }, values: { flags, ...flagProjection(flags) } }])
   const row = await scope.data.dataset(scope.datasets.messages).get({ id: String(membership.messageId) })
   if (!row) return []
   return [{ ...row, uid, logicalId: String(row.id), contentRevision: row.contentRevision, flags: [...flags], date: row.sortDate ?? row.date } as unknown as CachedMessage]

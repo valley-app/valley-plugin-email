@@ -143,14 +143,16 @@ describe('package-owned mail data and RPC', () => {
     const handlers = new Map<string, (payload: unknown) => Promise<unknown>>()
     const api: MailBackendApi = { data: mock.api.data,
       accounts: { list: vi.fn(async () => []), authorize: vi.fn() },
-      credentials: { state: vi.fn(async () => 'ok' as const), set: vi.fn(), delete: vi.fn(), handle: vi.fn(), write: vi.fn() },
+      credentials: { presence: vi.fn(async () => 'stored' as const), state: vi.fn(async () => 'ok' as const), set: vi.fn(), delete: vi.fn(), handle: vi.fn(), write: vi.fn() },
       network: { fetch: vi.fn(), open: vi.fn(), read: vi.fn(), write: vi.fn(), startTls: vi.fn(), close: vi.fn() },
       rpc: { handle: (name, handler) => { handlers.set(name, handler); return () => { handlers.delete(name) } }, emit: vi.fn() }
     }
     const dispose = register(api)
     await upsertAccount(scope, account)
-    expect(await handlers.get('listAccounts')!({})).toMatchObject({ ok: true, data: { accounts: [{ ...account, secretState: 'ok' }] } })
+    expect(await handlers.get('listAccounts')!({})).toMatchObject({ ok: true, data: { accounts: [{ ...account, secretState: 'stored' }] } })
     expect(await handlers.get('applyMessageAction')!({ accountId: 'station', folder: 'INBOX', uid: 1.5, action: 'trash' })).toMatchObject({ ok: false })
+    expect(api.credentials.state).not.toHaveBeenCalled()
+    expect(api.credentials.presence).toHaveBeenCalledWith(account.id, expect.any(Object))
     expect(api.network.open).not.toHaveBeenCalled()
     dispose()
     expect(handlers.size).toBe(0)
@@ -326,4 +328,18 @@ describe('package-owned mail data and RPC', () => {
       expect(db.prepare('SELECT messageId FROM folder_messages WHERE accountId=? AND unread=1 ORDER BY accountId,folder,uid LIMIT 1000').all('station')).toEqual([{ messageId: 'message' }])
     } finally { db.close() }
   })
+})
+
+it('restores the exact cached membership bytes when a flag change is inverted', async () => {
+  await mergeFolder(scope, 'station', 'INBOX', [{ ...message, flags: ['\\Seen', '\\Flagged'] }])
+  const key = { accountId: 'station', folder: 'INBOX', uid: 7 }
+  const memberships = scope.data.dataset('folder_messages')
+  const before = JSON.stringify(await memberships.get(key))
+  expect(JSON.parse(before).flags).toEqual(['\\Flagged', '\\Seen'])
+  await updateMessageFlags(scope, 'station', 'INBOX', 7, [], ['\\Seen'])
+  expect((await memberships.get(key))?.flags).toEqual(['\\Flagged'])
+  await updateMessageFlags(scope, 'station', 'INBOX', 7, ['\\Seen'])
+  expect(JSON.stringify(await memberships.get(key))).toBe(before)
+  await mergeFolder(scope, 'station', 'INBOX', [{ ...message, flags: ['\\Seen', '\\Flagged'] }])
+  expect(JSON.stringify(await memberships.get(key))).toBe(before)
 })

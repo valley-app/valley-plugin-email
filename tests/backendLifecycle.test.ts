@@ -1,6 +1,9 @@
 import { assertCommandOutput } from './commandContracts'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { createMockValleyApi } from '@valley/plugin-testkit'
+import type { PluginBackendApi, PluginBackendOperationContext } from '@valley/plugin-sdk'
+import type { PluginServiceCausation } from '@valley/plugin-sdk/pluginServices'
 import type { ValleyPluginManifest } from '@valley/plugin-sdk/types'
 import config from '../config.json'
 import { register, type MailBackendApi } from '../src/backend'
@@ -8,6 +11,7 @@ import { establishFolderEpoch, emailStoreContext, mergeFolder, readFolder, upser
 import { MAIL_WORK_LIMITS } from '../src/backend/workQueue'
 import * as transport from '../src/backend/transport'
 import { encodeBytes } from '../src/backend/encoding'
+import { cacheMailboxes } from '../src/backend/query'
 import type { CachedMessage, EmailAccount } from '../src/mailTypes'
 
 function deferred() {
@@ -15,31 +19,171 @@ function deferred() {
   const promise = new Promise<void>(done => { resolve = done })
   return { promise, resolve }
 }
+type Causation = PluginServiceCausation
+function causationHost() {
+  const current = new AsyncLocalStorage<Causation>()
+  const receipts = new Map<string, Causation>()
+  const events: Array<{ serviceId: string; event: string; payload: unknown; causation: Causation | null }> = []
+  const copy = (value: Causation | undefined) => value ? { ...value } : null
+  const services = {
+    captureCausation: vi.fn(async () => { const origin = current.getStore(); if (!origin) return undefined; const receipt = crypto.randomUUID(); receipts.set(receipt, { ...origin }); return receipt }),
+    inspectCausation: vi.fn(async (receipt?: string) => copy(receipt === undefined ? current.getStore() : receipts.get(receipt))),
+    emit: vi.fn(async (serviceId: string, event: string, payload: unknown) => { events.push({ serviceId, event, payload: structuredClone(payload), causation: copy(current.getStore()) }) })
+  }
+  const withCausation = <T>(run: () => Promise<T>) => current.run({ rootId: crypto.randomUUID(), runId: crypto.randomUUID(), originPlugin: 'email', depth: 0 }, run)
+  return { services, events, withCausation }
+}
 const message: CachedMessage = { uid: 1, messageId: '<survey@example.test>', from: 'sender@example.test', to: 'reader@example.test', subject: 'Survey', date: '2026-09-19T10:00:00Z', snippet: 'Forest', text: 'Forest', flags: [], hasAttachments: false }
 const account = (id: string): EmailAccount => ({ id, provider: 'pureemail', address: `${id}@example.test`, createdAt: 0,
   imap: { host: 'imap.example.test', port: 993, secure: true }, smtp: { host: 'smtp.example.test', port: 465, secure: true } })
 
-async function fixture(ids = ['a', 'b'], i18n?: MailBackendApi['i18n']) {
+async function fixture(ids = ['a', 'b'], i18n?: MailBackendApi['i18n'], services?: MailBackendApi['services'], notifications?: MailBackendApi['notifications'], captureOperations = false) {
   const mock = createMockValleyApi({ manifest: { id: 'email', datasets: config.datasets as unknown as ValleyPluginManifest['datasets'] } })
   const scope = emailStoreContext(mock.api.data)
   for (const id of ids) await upsertAccount(scope, account(id))
   const handlers = new Map<string, (payload: unknown) => Promise<unknown>>()
+  const operations = new Map<string, Parameters<PluginBackendApi['rpc']['handleOperation']>[1]>()
+  const handleOperation: PluginBackendApi['rpc']['handleOperation'] = (name, handler) => { operations.set(name, handler); return () => { operations.delete(name) } }
   const api: MailBackendApi = {
     i18n,
+    services,
+    notifications,
     data: mock.api.data,
     accounts: { list: vi.fn(async () => []), authorize: vi.fn() },
-    credentials: { state: vi.fn(async () => 'ok' as const), set: vi.fn(), delete: vi.fn(), handle: vi.fn(), write: vi.fn() },
+    credentials: { presence: vi.fn(async () => 'stored' as const), state: vi.fn(async () => 'ok' as const), set: vi.fn(), delete: vi.fn(), handle: vi.fn(), write: vi.fn() },
     network: { fetch: vi.fn(), open: vi.fn(), read: vi.fn(), write: vi.fn(), startTls: vi.fn(), close: vi.fn(async () => {}) },
-    rpc: { handle: (name, handler) => { handlers.set(name, handler); return () => { handlers.delete(name) } }, emit: vi.fn() }
+    rpc: { handle: (name, handler) => { handlers.set(name, handler); return () => { handlers.delete(name) } }, emit: vi.fn(), ...(captureOperations ? { handleOperation } : {}) }
   }
   const dispose = register(api)
   const call = async (name: string, payload: unknown) => assertCommandOutput(name, payload, await handlers.get(name)!(payload))
-  return { mock, scope, api, handlers, dispose, call }
+  return { mock, scope, api, handlers, operations, dispose, call }
 }
 
-afterEach(() => vi.restoreAllMocks())
+afterEach(() => { vi.restoreAllMocks(); vi.useRealTimers() })
 
 describe('backend account work ownership', () => {
+  it('starts automatic sync in a later turn and cancels that startup when disposed', async () => {
+    vi.useFakeTimers()
+    const fetch = vi.spyOn(transport, 'fetchFolder').mockResolvedValue({ messages: [], uidValidity: 1 })
+    const notifications = { notify: vi.fn() } as unknown as MailBackendApi['notifications']
+    const host = await fixture(['a'], undefined, undefined, notifications)
+    expect(fetch).not.toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(fetch).toHaveBeenCalledOnce()
+    await host.dispose()
+    fetch.mockClear()
+    const stopped = await fixture(['a'], undefined, undefined, notifications)
+    await stopped.dispose()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(fetch).not.toHaveBeenCalled()
+  })
+  it('tests both saved transports independently and exposes cached folder failures', async () => {
+    const host = await fixture(['a'])
+    const imap = vi.spyOn(transport, 'verifyImap').mockRejectedValue(new Error('[AUTHENTICATIONFAILED] Login denied'))
+    const smtp = vi.spyOn(transport, 'verifySmtp').mockResolvedValue(undefined)
+    expect(await host.call('testAccount', { accountId: 'a' })).toMatchObject({ ok: true, data: { imap: { ok: false, error: '[AUTHENTICATIONFAILED] Login denied' }, smtp: { ok: true } } })
+    expect(imap).toHaveBeenCalledOnce(); expect(smtp).toHaveBeenCalledOnce(); expect(host.api.credentials.set).not.toHaveBeenCalled()
+    await cacheMailboxes(host.scope, 'a', [{ path: 'INBOX', name: 'INBOX', selectable: true }])
+    vi.spyOn(transport, 'listFolders').mockRejectedValue(new Error('Authentication failed password=hidden'))
+    const folders = await host.call('listFolders', { accountId: 'a' })
+    expect(folders).toMatchObject({ ok: true, data: { folders: ['INBOX'], warning: expect.stringContaining('cached folders') } })
+    expect(JSON.stringify(folders)).not.toContain('hidden'); expect(JSON.stringify(folders)).toContain('[redacted]')
+    await host.dispose()
+  })
+  it('reports unknown accounts, missing messages and rejected input as known no-effect refusals', async () => {
+    const host = await fixture(['a'])
+    const remote = [vi.spyOn(transport, 'verifyImap'), vi.spyOn(transport, 'verifySmtp'), vi.spyOn(transport, 'sendMail'), vi.spyOn(transport, 'applyMessageAction')]
+    const missing = { ok: false, error: 'Unknown account.', code: 'ACCOUNT_NOT_FOUND', outcome: 'not-applied' }
+    expect(await host.call('testAccount', { accountId: 'missing' })).toEqual(missing)
+    expect(await host.call('listFolders', { accountId: 'missing' })).toEqual(missing)
+    expect(await host.call('syncFolder', { accountId: 'missing' })).toEqual(missing)
+    expect(await host.call('sendEmail', { accountId: 'missing', to: 'reader@example.test', text: 'Hello' })).toEqual(missing)
+    expect(await host.call('applyMessageAction', { accountId: 'missing', folder: 'INBOX', uid: 1, action: 'flag' })).toEqual(missing)
+    expect(await host.call('updateSmtpAccount', { accountId: 'missing', address: 'x@example.test', login: 'x', password: 'secret' })).toEqual(missing)
+    expect(await host.call('applyMessageAction', { accountId: 'a', folder: 'INBOX', uid: 9, uidValidity: 1, action: 'flag' })).toMatchObject({ ok: false, code: 'MESSAGE_NOT_FOUND', outcome: 'not-applied' })
+    expect(await host.call('applyMessageAction', { accountId: 'a', folder: 'INBOX', uid: 1, action: 'explode' })).toMatchObject({ ok: false, error: expect.any(String), code: 'INVALID_INPUT', outcome: 'not-applied' })
+    expect(await host.call('syncFolder', {})).toMatchObject({ ok: false, code: 'INVALID_INPUT', outcome: 'not-applied' })
+    for (const spy of remote) expect(spy).not.toHaveBeenCalled()
+    expect(host.api.credentials.set).not.toHaveBeenCalled()
+    expect(vi.mocked(host.api.rpc.emit).mock.calls.filter(([, payload]) => (payload as { accountId?: string }).accountId === 'missing')).toEqual([])
+    await host.dispose()
+  })
+  it('reports a refused automatic reply as a known no-effect refusal', async () => {
+    const causal = causationHost()
+    const notify = vi.fn(async () => true)
+    const host = await fixture(['a'], undefined, causal.services, { notify } as unknown as MailBackendApi['notifications'])
+    const send = vi.spyOn(transport, 'sendMail')
+    const refused = await causal.withCausation(() => host.call('sendEmail', { accountId: 'a', to: 'reader@example.test', text: 'Hello', inReplyTo: '<missing@example.test>' }))
+    expect(refused).toMatchObject({ ok: false, code: 'AUTOMATIC_INCOMING_UNAVAILABLE', outcome: 'not-applied' })
+    expect(send).not.toHaveBeenCalled()
+    expect(notify).not.toHaveBeenCalled()
+    expect(await host.mock.api.data.files.list('automatic-mail')).toEqual([])
+    await host.dispose()
+  })
+  it('publishes incoming Workflow events only after cache and sync cursor commits', async () => {
+    const emit = vi.fn(async (_service: string, _event: string, payload: unknown) => {
+      const value = payload as { uid: number }
+      expect(Number((await host.scope.data.dataset('sync_state').get({ accountId: 'a', folder: 'INBOX' }))?.cursor)).toBe(value.uid)
+      expect((await readFolder(host.scope, 'a', 'INBOX')).some(message => message.uid === value.uid)).toBe(true)
+    })
+    const host = await fixture(['a'], undefined, { emit } as unknown as MailBackendApi['services'])
+    const fetch = vi.spyOn(transport, 'fetchFolder').mockResolvedValueOnce({ messages: [{ ...message, uidValidity: 1 }], uidValidity: 1 })
+    expect(await host.call('syncFolder', { accountId: 'a' })).toMatchObject({ ok: true }); expect(emit).not.toHaveBeenCalled()
+    const incoming = { ...message, uid: 2, uidValidity: 1, receivedAt: new Date(Date.now() + 1000).toISOString(), automationHeaders: { observed: true as const, autoSubmitted: [], precedence: [], listId: [], suppress: [], origin: [], inReplyTo: ['<request@example.test>'] } }
+    fetch.mockResolvedValue({ messages: [incoming], uidValidity: 1 })
+    expect(await host.call('syncFolder', { accountId: 'a' })).toMatchObject({ ok: true })
+    expect(emit).toHaveBeenCalledWith('workflow.provider', 'message.received', expect.objectContaining({ accountId: 'a', uid: 2, inReplyTo: '<request@example.test>' }))
+    await host.call('syncFolder', { accountId: 'a' }); expect(emit).toHaveBeenCalledOnce()
+    await host.dispose()
+  })
+  it('keeps host-issued event causation through a deferred cache commit without trusting incoming headers', async () => {
+    const host = causationHost()
+    const rootEmit = vi.fn()
+    const mail = await fixture(['a'], undefined, { ...host.services, emit: rootEmit } as MailBackendApi['services'], undefined, true)
+    const fetch = vi.spyOn(transport, 'fetchFolder').mockResolvedValueOnce({ messages: [{ ...message, uidValidity: 1 }], uidValidity: 1 })
+    expect(await mail.call('syncFolder', { accountId: 'a' })).toMatchObject({ ok: true })
+    const forgedOrigin = crypto.randomUUID()
+    fetch.mockResolvedValue({ messages: [{ ...message, uid: 2, uidValidity: 1, receivedAt: new Date(Date.now() + 1000).toISOString(), automationHeaders: { observed: true, autoSubmitted: [], precedence: [], listId: [], suppress: [], origin: [forgedOrigin] } }], uidValidity: 1 })
+    const entered = deferred(), commit = deferred()
+    const transaction = mail.api.data.transaction
+    vi.spyOn(mail.api.data, 'transaction').mockImplementationOnce(async (...args) => { entered.resolve(); await commit.promise; return transaction(...args) })
+    const operation: PluginBackendOperationContext = { id: crypto.randomUUID(), cancellation: new AbortController().signal, api: { ...mail.api, services: host.services } as unknown as PluginBackendOperationContext['api'] }
+    const captured = await host.withCausation(async () => ({ receipt: await host.services.captureCausation(), origin: await host.services.inspectCausation(), pending: mail.operations.get('command.syncFolder')!({ accountId: 'a' }, operation) }))
+    expect(captured.receipt).toEqual(expect.any(String))
+    expect(captured.origin).not.toBeNull()
+    await entered.promise
+    expect(host.events).toEqual([])
+    expect(rootEmit).not.toHaveBeenCalled()
+    expect((await readFolder(mail.scope, 'a', 'INBOX')).some(value => value.uid === 2)).toBe(false)
+    const inspection = await host.services.inspectCausation(captured.receipt!)
+    inspection!.originPlugin = 'caller-forgery'
+    commit.resolve()
+    expect(await captured.pending).toMatchObject({ ok: true })
+    expect(Number((await mail.scope.data.dataset('sync_state').get({ accountId: 'a', folder: 'INBOX' }))?.cursor)).toBe(2)
+    expect((await readFolder(mail.scope, 'a', 'INBOX')).some(value => value.uid === 2)).toBe(true)
+    expect(host.events).toHaveLength(1)
+    expect(host.events[0]).toMatchObject({ serviceId: 'workflow.provider', event: 'message.received', causation: captured.origin, payload: { uid: 2, automationHeaders: { origin: [forgedOrigin] } } })
+    expect(await host.services.inspectCausation(forgedOrigin)).toBeNull()
+    expect(await host.services.inspectCausation(captured.receipt!)).toEqual(captured.origin)
+    expect(rootEmit).not.toHaveBeenCalled()
+    await mail.dispose()
+  })
+
+  it('updates credentials through host storage without replacing the account or message cache', async () => {
+    const host = await fixture(['a'])
+    await establishFolderEpoch(host.scope, 'a', 'INBOX', 1)
+    await mergeFolder(host.scope, 'a', 'INBOX', [{ ...message, uidValidity: 1 }])
+    const verify = vi.spyOn(transport, 'verifyImap').mockResolvedValue(undefined)
+    const result = await host.call('updateSmtpAccount', { accountId: 'a', address: 'updated@example.test', login: 'login-user', password: 'replacement' })
+    expect(result).toMatchObject({ ok: true, data: { account: { id: 'a', login: 'login-user', address: 'updated@example.test' } } })
+    expect(host.api.credentials.set).toHaveBeenCalledWith('a', 'replacement', expect.any(Array), transport.MAIL_CREDENTIAL_STORE)
+    expect(verify).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ id: 'a', login: 'login-user' }))
+    expect(await readFolder(host.scope, 'a', 'INBOX')).toHaveLength(1)
+    expect(await host.api.data.files.readText('accounts.json')).not.toContain('replacement')
+    expect(host.api.credentials.delete).not.toHaveBeenCalled()
+    await host.dispose()
+  })
+
   it('submits an inline reply once and retains an uncertain reply for recovery', async () => {
     const host = await fixture(['a'])
     await establishFolderEpoch(host.scope, 'a', 'INBOX', 1)
@@ -68,7 +212,7 @@ describe('backend account work ownership', () => {
     held.resolve()
     expect(await accepted).toEqual({ ok: false, error: 'first:email.backend.sentCacheFailed', outcome: 'remote-complete', data: { messageId: '<sent@example.test>' } })
     await stopped
-    expect(await second.call('syncFolder', { accountId: 'missing' })).toEqual({ ok: false, error: 'second:email.backend.account' })
+    expect(await second.call('syncFolder', { accountId: 'missing' })).toEqual({ ok: false, error: 'second:email.backend.account', code: 'ACCOUNT_NOT_FOUND', outcome: 'not-applied' })
     await second.dispose()
   })
 
@@ -101,6 +245,22 @@ describe('backend account work ownership', () => {
     expect(fetch.mock.calls.filter(([, owner]) => owner.id === 'a')).toHaveLength(1)
     expect(await readFolder(host.scope, 'a', 'INBOX')).toEqual([])
     expect(await readFolder(host.scope, 'b', 'INBOX')).toHaveLength(1)
+    await host.dispose()
+  })
+
+  it('refuses removeAccount for an id without a local account before deleting credentials or cached mail', async () => {
+    const host = await fixture()
+    vi.mocked(host.api.accounts.list).mockResolvedValue([{ id: 'google-1', provider: 'google', address: 'g@example.test', capabilities: ['mail'] } as never])
+    await mergeFolder(host.scope, 'google-1', 'INBOX', [message])
+    const before = await readFolder(host.scope, 'google-1', 'INBOX')
+    for (const accountId of ['google-1', 'missing']) {
+      expect(await host.call('removeAccount', { accountId })).toEqual({ ok: false, error: 'Unknown account.', code: 'ACCOUNT_NOT_FOUND', outcome: 'not-applied' })
+    }
+    expect(host.api.credentials.delete).not.toHaveBeenCalled()
+    expect(await readFolder(host.scope, 'google-1', 'INBOX')).toEqual(before)
+    expect(before).toHaveLength(1)
+    expect(await host.call('removeAccount', { accountId: 'a' })).toMatchObject({ ok: true, data: { accounts: [expect.objectContaining({ id: 'google-1' }), expect.objectContaining({ id: 'b' })] } })
+    expect(host.api.credentials.delete).toHaveBeenCalledOnce()
     await host.dispose()
   })
 

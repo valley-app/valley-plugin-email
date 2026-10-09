@@ -1,3 +1,4 @@
+import { commandRegistrar, emailResults } from './commandResults'
 import { uiText } from './localization'
 import { mailApi } from './mailApi'
 import {
@@ -167,7 +168,7 @@ function emailToolDefinitions(api: ValleyPluginApi): AgentToolDefinition[] {
       }
     },
     {
-      name: 'update_email_message', description: 'Mark a message read or unread, flag or unflag it, archive it, or move it to Trash.',
+      name: 'update_email_message', description: 'Mark a message read or unread, flag or unflag it, archive it, or move it to Trash. Read and flag changes are undoable; Archive and Trash moves cannot be undone because the mail server assigns the moved message a new UID.',
       parameters: schema({
         accountId: accountArg,
         folder: folderArg,
@@ -301,6 +302,32 @@ function emailToolDefinitions(api: ValleyPluginApi): AgentToolDefinition[] {
 
 const commandId = (name: string): string => name.replaceAll('_', '-')
 
+type FlagAction = 'mark-read' | 'mark-unread' | 'flag' | 'unflag'
+const flagInverse: Record<FlagAction, FlagAction> = { 'mark-read': 'mark-unread', 'mark-unread': 'mark-read', flag: 'unflag', unflag: 'flag' }
+const flagSet = (action: FlagAction): { flag: string; present: boolean } => ({ flag: action === 'flag' || action === 'unflag' ? '\\Flagged' : '\\Seen', present: action === 'mark-read' || action === 'flag' })
+interface FlagEdit { accountId: string; folder: string; uid: number; action: FlagAction }
+
+async function flagRevertTarget(api: ValleyPluginApi, input: Record<string, unknown>): Promise<FlagEdit | undefined> {
+  const action = str(input.action)
+  if (!Object.hasOwn(flagInverse, action)) return undefined
+  const edit = { accountId: str(input.accountId), folder: str(input.folder) || 'INBOX', uid: Number(input.uid), action: action as FlagAction }
+  const before = await cachedMessage(api, edit.accountId, edit.folder, edit.uid).catch(() => undefined)
+  if (!before) return undefined
+  const { flag, present } = flagSet(edit.action)
+  return before.flags.includes(flag) === present ? undefined : edit
+}
+
+function flagRevert(api: ValleyPluginApi, edit: FlagEdit) {
+  const apply = async (expected: FlagAction, action: FlagAction): Promise<void> => {
+    const current = await cachedMessage(api, edit.accountId, edit.folder, edit.uid)
+    const { flag, present } = flagSet(expected)
+    if (current.flags.includes(flag) !== present) throw Object.assign(new Error('The message flags changed after this edit.'), { code: 'REVISION_CONFLICT', outcome: 'not-applied' as const })
+    const result = await mailApi(api).applyMessageAction({ accountId: edit.accountId, folder: edit.folder, uid: edit.uid, action })
+    if (!result.ok) throw new Error(result.error ?? uiText('email.agentError.update'))
+  }
+  return { label: 'Restore email message flags', run: () => apply(edit.action, flagInverse[edit.action]), reapply: () => apply(flagInverse[edit.action], edit.action) }
+}
+
 function commandSchema(tool: AgentToolDefinition): Record<string, unknown> {
   const properties = tool.parameters.properties as Record<string, unknown>
   const required = [...(tool.parameters.required as string[] ?? [])]
@@ -329,8 +356,8 @@ function parseToolInput(raw: unknown, parameters: Record<string, unknown>): Reco
 export function registerEmailAgentCommands(api: ValleyPluginApi): () => void {
   const offs = emailToolDefinitions(api).map((tool) => {
     const parameters = commandSchema(tool)
-    return api.commands.register({
-      id: commandId(tool.name), label: `Email: ${tool.description}`, paletteSafe: false, sideEffect: tool.sideEffect, timeoutMs: tool.timeoutMs,
+    return commandRegistrar(api)({
+      id: commandId(tool.name), outputSchema: emailResults[commandId(tool.name)], label: `Email: ${tool.description}`, paletteSafe: false, sideEffect: tool.sideEffect, timeoutMs: tool.timeoutMs,
       input: { schema: parameters, parse: (raw) => parseToolInput(raw, parameters) },
       preview: (input) => ({ action: commandId(tool.name), ...input }),
       revision: async (input) => {
@@ -339,10 +366,11 @@ export function registerEmailAgentCommands(api: ValleyPluginApi): () => void {
         return null
       },
       run: async (input, context) => {
+        const flagEdit = tool.name === 'update_email_message' ? await flagRevertTarget(api, input) : undefined
         const output = await tool.run(input, { cancellation: context.cancellation })
         let value: unknown = output
         if (typeof output === 'string') { try { value = JSON.parse(output) } catch { value = output } }
-        return tool.sideEffect === 'write' ? { value, revert: null } : value
+        return tool.sideEffect === 'write' ? { value, revert: flagEdit ? flagRevert(api, flagEdit) : null } : value
       }
     })
   })

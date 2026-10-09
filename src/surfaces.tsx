@@ -1,3 +1,4 @@
+import { commandRegistrar, emailResults } from './commandResults'
 import { mailApi } from './mailApi'
 import { METADATA_PANEL_SEGMENT_V1, provideBookmarkSurface, type PluginInspectionSubject, type PluginProperty, type ValleyPluginApi } from '@valley/plugin-sdk'
 import type { EmailMessageDetail, EmailMessageRef } from './mailTypes'
@@ -170,17 +171,34 @@ function parsePropertyUpdate(raw: unknown): { target: EmailSelection; values: Re
   return { target, values: structuredClone(value.values) }
 }
 
-async function updateProperties({ target, values }: ReturnType<typeof parsePropertyUpdate>) {
+type FlagValues = Record<string, unknown>
+const flagState = (message: EmailMessageDetail): Record<'read' | 'flagged', boolean> => ({ read: message.flags.includes('\\Seen'), flagged: message.flags.includes('\\Flagged') })
+
+async function applyFlags(ref: EmailMessageRef, values: FlagValues): Promise<void> {
   const store = getStore()
-  if (target.message) {
-    await readMessage(target.message)
-    const applied: string[] = []
-    for (const [key, value] of Object.entries(values)) {
-      if (!(await store.act(target.message, key === 'read' ? value ? 'mark-read' : 'mark-unread' : value ? 'flag' : 'unflag'))) throw new Error(`${store.getSnapshot().error || uiText('email.actionFailed')}${applied.length ? uiText('email.error.partial', { value: applied.join(', ') }) : uiText('email.error.retry')}`)
-      applied.push(key)
-    }
+  const applied: string[] = []
+  for (const [key, value] of Object.entries(values)) {
+    if (!(await store.act(ref, key === 'read' ? value ? 'mark-read' : 'mark-unread' : value ? 'flag' : 'unflag'))) throw new Error(`${store.getSnapshot().error || uiText('email.actionFailed')}${applied.length ? uiText('email.error.partial', { value: applied.join(', ') }) : uiText('email.error.retry')}`)
+    applied.push(key)
   }
-  return { value: values, revert: null }
+}
+
+async function restoreFlags(ref: EmailMessageRef, expected: FlagValues, next: FlagValues): Promise<void> {
+  const current = flagState(await readMessage(ref)) as FlagValues
+  if (Object.entries(expected).some(([key, value]) => current[key] !== value)) throw Object.assign(new Error('The message flags changed after this edit.'), { code: 'REVISION_CONFLICT', outcome: 'not-applied' as const })
+  await applyFlags(ref, next)
+}
+
+async function updateProperties({ target, values }: ReturnType<typeof parsePropertyUpdate>) {
+  if (!target.message) return { value: values, revert: null }
+  const ref = target.message
+  const previous = flagState(await readMessage(ref)) as FlagValues
+  await applyFlags(ref, values)
+  const changed = Object.keys(values).filter((key) => previous[key] !== values[key])
+  if (!changed.length) return { value: values, revert: null }
+  const before = Object.fromEntries(changed.map((key) => [key, previous[key]]))
+  const after = Object.fromEntries(changed.map((key) => [key, values[key]]))
+  return { value: values, revert: { label: 'Restore email message properties', run: () => restoreFlags(ref, after, before), reapply: () => restoreFlags(ref, before, after) } }
 }
 
 function Properties({ subject }: { subject?: PluginInspectionSubject }): React.ReactElement {
@@ -256,13 +274,13 @@ export function registerEmailSurfaces(pluginApi: ValleyPluginApi): () => void {
   }
   offs.push(store.subscribe(syncMessageSegment), () => offMessage?.())
   syncMessageSegment()
-  offs.push(pluginApi.commands.register({
-    id: 'open-selection', label: 'Email: Open a mailbox or message', labelKey: 'email.command.openSelection', sideEffect: 'read', paletteSafe: false,
+  offs.push(commandRegistrar(pluginApi)({
+    id: 'open-selection', outputSchema: emailResults['open-selection'], label: 'Email: Open a mailbox or message', labelKey: 'email.command.openSelection', sideEffect: 'read', paletteSafe: false,
     input: { schema: { type: 'object', properties: { accountIds: { type: 'array', items: { type: 'string' } }, view: { type: 'string', enum: ['folder', 'recent', 'unread', 'flagged'] }, folder: { type: 'string' }, query: { type: 'string' }, message: { type: 'object', properties: { accountId: { type: 'string' }, folder: { type: 'string' }, uid: { type: 'integer', minimum: 1 } }, required: ['accountId', 'folder', 'uid'] } }, additionalProperties: false }, parse: selection },
     run: async (target) => { await store.restoreSelection(target); pluginApi.workspace.openMainTab(); return { ...target } }
   }))
-  offs.push(pluginApi.commands.register({
-    id: 'update-properties', label: 'Email: Edit Properties', labelKey: 'email.command.updateProperties', sideEffect: 'write', paletteSafe: false,
+  offs.push(commandRegistrar(pluginApi)({
+    id: 'update-properties', outputSchema: emailResults['update-properties'], label: 'Email: Edit Properties', labelKey: 'email.command.updateProperties', sideEffect: 'write', paletteSafe: false,
     input: { schema: { type: 'object', properties: { subject: { type: 'object' }, values: { type: 'object', additionalProperties: true } }, required: ['subject', 'values'], additionalProperties: false }, parse: parsePropertyUpdate },
     revision: async ({ target }) => target.message ? readMessage(target.message) : target,
     preview: (input) => input,

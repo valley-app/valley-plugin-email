@@ -4,8 +4,10 @@ import type { PluginDataApi, PluginBackendApi, PluginBackendOperationContext } f
 import type { EmailAccount, CachedMessage } from '../mailTypes'
 import { cacheMailboxes, cachedMailboxes, parseEmailAddresses, queryMessages, readMessage } from './query'
 import { readAccounts as readEmailAccounts, upsertAccount, getAccount as getEmailAccount, removeAccountFiles, readFolder, mergeFolder, establishFolderEpoch, appendMessage, folderCacheStats, updateMessageFlags, moveCachedMessage, emailStoreContext, type EmailStoreContext } from './cache'
-import { accountEndpoint, credentialName, MAIL_CREDENTIAL_STORE, verifyImap, listFolders, fetchFolder, sendMail, applyMessageAction as applyRemoteMessageAction, type MailTransportApi } from './transport'
+import { accountEndpoint, credentialName, MAIL_CREDENTIAL_STORE, verifyImap, verifySmtp, mailDiagnostic, listFolders, fetchFolder, sendMail, applyMessageAction as applyRemoteMessageAction, type MailTransportApi } from './transport'
 import { createMailWorkQueue } from './workQueue'
+import { automationHeaders, MailRefusal, prepareAutomaticMail, type MailAutomationServices } from './automation'
+import { createWorkflowAdapter } from './workflow'
 
 interface MailRpc {
   handleOperation?: PluginBackendApi['rpc']['handleOperation']
@@ -13,8 +15,8 @@ interface MailRpc {
   emit(name: string, payload: unknown): void
 }
 
-export interface MailBackendApi extends MailTransportApi { notifications?: PluginBackendApi['notifications']; lifecycle?: PluginBackendApi['lifecycle']; settings?: PluginBackendApi['settings']; data: PluginDataApi; rpc: MailRpc; i18n?: { t(key: string, params?: Record<string, string | number>): string } }
-interface MailBackendContext extends EmailStoreContext, MailTransportApi { notifications?: PluginBackendApi['notifications']; rpc: MailRpc; t: ReturnType<typeof createTranslator> }
+export interface MailBackendApi extends MailTransportApi { services?: MailAutomationServices; notifications?: PluginBackendApi['notifications']; lifecycle?: PluginBackendApi['lifecycle']; settings?: PluginBackendApi['settings']; data: PluginDataApi; rpc: MailRpc; i18n?: { t(key: string, params?: Record<string, string | number>): string } }
+interface MailBackendContext extends EmailStoreContext, MailTransportApi { services?: MailAutomationServices & Partial<Pick<PluginBackendApi['services'], 'emit'>>; notifications?: PluginBackendApi['notifications']; rpc: MailRpc; t: ReturnType<typeof createTranslator> }
 
 class RemoteMailCacheError extends Error {
   constructor(message: string, readonly result: unknown) { super(message) }
@@ -32,7 +34,7 @@ async function centralMailAccounts(scope: MailBackendContext): Promise<EmailAcco
   return (await scope.accounts.list()).flatMap((account): EmailAccount[] => {
     const endpoints = hosts[account.provider as keyof typeof hosts]
     return account.capabilities.includes('mail') && account.address && endpoints
-      ? [{ id: account.id, provider: account.provider, address: account.address, displayName: account.displayName, createdAt: 0, ...endpoints }]
+      ? [{ id: account.id, provider: account.provider, address: account.address, displayName: account.displayName, createdAt: 0, secretState: account.credentialState, ...endpoints }]
       : []
   })
 }
@@ -61,10 +63,8 @@ const methods = {
   listAccounts: mailMethod(z.object({}).optional(), async (scope) => {
       const central = await centralMailAccounts(scope)
       const local = (await readEmailAccounts(scope)).filter((a) => a.provider === 'pureemail')
-      // Surface password health so the settings pane can prompt a re-entry
-      // after a keychain reset instead of failing silently at sync time.
       const decorated = await Promise.all(
-        local.map(async (a) => ({ ...a, secretState: await scope.credentials.state(credentialName(a.id), MAIL_CREDENTIAL_STORE) }))
+        local.map(async (a) => ({ ...a, secretState: await scope.credentials.presence(credentialName(a.id), MAIL_CREDENTIAL_STORE) }))
       )
       // `{ accounts }`, like every other method here and like `EmailAccountsResult`
       // declares. A bare array put `accounts` at `data` itself, so every reader's
@@ -74,6 +74,7 @@ const methods = {
 
   addSmtpAccount: mailMethod(z.object({
       address: z.string().email(),
+      login: z.string().min(1).max(320).optional(),
       displayName: z.string().optional(),
       password: z.string().min(1),
       imap: hostSchema,
@@ -85,6 +86,7 @@ const methods = {
         id,
         provider: 'pureemail',
         address: p.address,
+        ...(p.login ? { login: p.login } : {}),
         displayName: p.displayName,
         imap: p.imap,
         smtp: p.smtp,
@@ -104,11 +106,24 @@ const methods = {
       return { account, accounts: [...central, ...local] }
     }),
 
+  updateSmtpAccount: mailMethod(z.object({ accountId: z.string().min(1), address: z.string().email(), login: z.string().min(1).max(320), password: z.string().min(1).max(65536) }).strict(), async (scope, payload) => {
+      const previous = await getEmailAccount(scope, payload.accountId)
+      if (!previous || previous.provider !== 'pureemail') throw new MailRefusal('ACCOUNT_NOT_FOUND', scope.t('email.backend.account'))
+      const account = { ...previous, address: payload.address, login: payload.login }
+      await scope.credentials.set(credentialName(account.id), payload.password, [accountEndpoint(account, 'imap'), accountEndpoint(account, 'smtp')], MAIL_CREDENTIAL_STORE)
+      await upsertAccount(scope, account)
+      await verifyImap(scope, account)
+      const central = await centralMailAccounts(scope)
+      const local = (await readEmailAccounts(scope)).filter(item => item.provider === 'pureemail')
+      return { account, accounts: [...central, ...local] }
+    }),
+
   removeAccount: mailMethod(z.object({ accountId: z.string().min(1) }), async (scope, payload) => {
       const { accountId: id } = payload
-      // Only PureMail accounts are removed here; centralized Google/Microsoft
-      // accounts are managed in Settings → Accounts. We still drop any cached
-      // messages for the id either way.
+      // Only locally stored (PureMail) accounts are removed here; centralized
+      // Google/Microsoft accounts are managed in Settings → Accounts, so an id
+      // without a local record is refused before any credential or cache change.
+      if (!await getEmailAccount(scope, id)) throw new MailRefusal('ACCOUNT_NOT_FOUND', scope.t('email.backend.account'))
       await scope.credentials.delete(credentialName(id), MAIL_CREDENTIAL_STORE)
       await removeAccountFiles(scope, id)
       const central = await centralMailAccounts(scope)
@@ -116,16 +131,27 @@ const methods = {
       return { accounts: [...central, ...local] }
     }),
 
+  testAccount: mailMethod(z.object({ accountId: z.string().min(1).max(4096) }).strict(), async (scope, payload) => {
+      const account = await resolveAccount(scope, payload.accountId)
+      if (!account) throw new MailRefusal('ACCOUNT_NOT_FOUND', scope.t('email.backend.account'))
+      const test = async (action: () => Promise<void>) => { try { await action(); return { ok: true } } catch (error) { return { ok: false, error: mailDiagnostic(error) } } }
+      const imap = await test(() => verifyImap(scope, account))
+      const smtp = await test(() => verifySmtp(scope, account))
+      return { checkedAt: new Date().toISOString(), imap, smtp }
+    }),
+
   listFolders: mailMethod(z.object({ accountId: z.string().min(1) }), async (scope, payload) => {
       const account = await resolveAccount(scope, payload.accountId)
-      if (!account) throw new Error(scope.t('email.backend.account'))
+      if (!account) throw new MailRefusal('ACCOUNT_NOT_FOUND', scope.t('email.backend.account'))
       let listed
+      let warning: string | undefined
       try {
         listed = await listFolders(scope, account)
         await cacheMailboxes(scope, payload.accountId, listed)
       } catch (error) {
         const cached = await cachedMailboxes(scope, payload.accountId)
         if (!cached.length) throw error
+        warning = scope.t('email.backend.cachedFoldersWarning', { error: mailDiagnostic(error) })
         listed = cached.map((row) => ({ path: String(row.path), name: String(row.name),
           selectable: row.selectable === true, specialUse: typeof row.specialUse === 'string' ? row.specialUse : undefined }))
       }
@@ -134,7 +160,7 @@ const methods = {
         const stats = counts.get(mailbox.path) ?? { total: 0, unread: 0 }
         return { ...mailbox, cachedTotal: stats.total, cachedUnread: stats.unread }
       })
-      return { folders: mailboxes.filter((mailbox) => mailbox.selectable).map((mailbox) => mailbox.path), mailboxes }
+      return { folders: mailboxes.filter((mailbox) => mailbox.selectable).map((mailbox) => mailbox.path), mailboxes, ...(warning ? { warning } : {}) }
     }),
 
   syncFolder: mailMethod(z.object({
@@ -144,7 +170,7 @@ const methods = {
     }), async (scope, payload) => {
       const p = payload
       const account = await resolveAccount(scope, p.accountId)
-      if (!account) throw new Error(scope.t('email.backend.account'))
+      if (!account) throw new MailRefusal('ACCOUNT_NOT_FOUND', scope.t('email.backend.account'))
       scope.rpc.emit('sync', { accountId: p.accountId, folder: p.folder, status: 'start' })
       try {
         const { messages, uidValidity } = await fetchFolder(scope, account, p.folder, p.limit)
@@ -159,6 +185,7 @@ const methods = {
         }
         await scope.data.dataset('sync_state').upsert({ accountId: p.accountId, folder: p.folder, uidValidity: uidValidity ?? null, cursor: String(Math.max(established ? Number(previous?.cursor ?? 0) : 0, ...messages.map(message => message.uid))), lastSyncAt: new Date().toISOString() })
         for (const message of messages.filter(message => arrived.includes(message.uid))) {
+          await scope.services?.emit?.('workflow.provider', 'message.received', { accountId: p.accountId, folder: p.folder, uid: message.uid, ...(uidValidity ? { uidValidity } : {}), messageId: message.messageId, from: message.from, to: message.to, subject: message.subject, ...(message.automationHeaders ? { automationHeaders: message.automationHeaders } : {}), ...(message.automationHeaders?.inReplyTo?.[0] ? { inReplyTo: message.automationHeaders.inReplyTo[0] } : {}) })
           await scope.notifications?.notify('newMail', {
             sourceEventId: `${p.accountId}:${uidValidity}:${message.uid}`, key: `mail:${p.accountId}:${uidValidity}:${message.uid}`,
             targetItemId: JSON.stringify({ accountId: p.accountId, folder: p.folder, uid: message.uid, uidValidity }),
@@ -207,15 +234,17 @@ const methods = {
     }), async (scope, payload) => {
       const p = payload
       const account = await resolveAccount(scope, p.accountId)
-      if (!account) throw new Error(scope.t('email.backend.account'))
+      if (!account) throw new MailRefusal('ACCOUNT_NOT_FOUND', scope.t('email.backend.account'))
       const attempt = crypto.randomUUID()
+      const automatic = await prepareAutomaticMail(scope, account, p)
       let messageId: string
-      try { messageId = await sendMail(scope, account, p) }
+      try { messageId = await sendMail(scope, account, p, automatic) }
       catch (error) {
         await scope.notifications?.notify('sendFailed', { sourceEventId: attempt, key: `send:${attempt}`, title: scope.t('notification.sendFailed'), body: p.subject, targetItemId: p.accountId, actions: [{ id: 'open', kind: 'open', label: scope.t('notification.open') }] }).catch(() => false)
         throw error
       }
       const sent: CachedMessage = {
+        automationHeaders: automationHeaders([...(automatic ? [{ key: 'Auto-Submitted', value: 'auto-generated' }, { key: 'X-Valley-Origin', value: automatic.origin }] : []), ...(p.inReplyTo ? [{ key: 'In-Reply-To', value: p.inReplyTo }, { key: 'References', value: p.inReplyTo }] : [])]),
         uid: Date.now(),
         messageId,
         from: account.address,
@@ -229,7 +258,7 @@ const methods = {
         flags: ['\\Seen'],
         hasAttachments: false
       }
-      try { await appendMessage(scope, p.accountId, 'Sent', sent) }
+      try { await automatic?.complete(); await appendMessage(scope, p.accountId, 'Sent', sent) }
       catch { throw new RemoteMailCacheError(scope.t('email.backend.sentCacheFailed'), { messageId }) }
       return { messageId }
     }),
@@ -241,8 +270,8 @@ const methods = {
       action: z.enum(['mark-read', 'mark-unread', 'flag', 'unflag', 'archive', 'trash', 'junk'])
     }), async (scope, payload) => {
       const account = await resolveAccount(scope, payload.accountId)
-      if (!account) throw new Error(scope.t('email.backend.account'))
-      if (payload.uidValidity !== undefined && !(await readMessage(scope, payload))) throw new Error(scope.t('email.selectionMissing'))
+      if (!account) throw new MailRefusal('ACCOUNT_NOT_FOUND', scope.t('email.backend.account'))
+      if (payload.uidValidity !== undefined && !(await readMessage(scope, payload))) throw new MailRefusal('MESSAGE_NOT_FOUND', scope.t('email.selectionMissing'))
       const remote = await applyRemoteMessageAction(scope, account, payload.folder, payload.uid, payload.action, payload.uidValidity)
       let messages: CachedMessage[]
       try {
@@ -281,36 +310,47 @@ const methods = {
 }
 
 export function register(api: MailBackendApi): () => Promise<void> {
+  const backend = api as unknown as PluginBackendApi
+  const workflow = backend.schema ? createWorkflowAdapter(backend, { readiness: async (nodeId, context) => {
+    if (nodeId === 'listAccounts' || nodeId === 'parseAddresses') return { state: 'Available' }
+    const owner = context?.api ?? backend
+    const local = await readEmailAccounts(emailStoreContext(owner.data))
+    const central = await owner.accounts.list()
+    return local.length || central.some(account => account.capabilities.includes('mail')) ? { state: 'Available' } : { state: 'Unconfigured', reason: 'Add or reconnect an account in Email or Accounts settings.' }
+  } }) : undefined
   setTranslator(api.i18n?.t)
   const t = createTranslator(api.i18n?.t)
   const work = createMailWorkQueue({ busy: () => t('email.backend.busy'), stopped: () => t('email.backend.stopped') })
   let disposed = false
   let draining: Promise<void> | undefined
   const scope: MailBackendContext = {
-    ...emailStoreContext(api.data), network: api.network, credentials: api.credentials, accounts: api.accounts, t, notifications: api.notifications,
+    ...emailStoreContext(api.data), network: api.network, credentials: api.credentials, accounts: api.accounts, services: api.services, t, notifications: api.notifications,
     rpc: { handle: api.rpc.handle, emit: (name, payload) => { if (!disposed) api.rpc.emit(name, payload) } }
   }
   const off = Object.entries(methods).map(([name, method]) => {
     const handler = async (payload: unknown, operation?: PluginBackendOperationContext) => {
+    const parsed = method.schema.safeParse(payload)
+    if (!parsed.success) return { ok: false, error: parsed.error.message, code: 'INVALID_INPUT', outcome: 'not-applied' as const }
     try {
-      const input = method.schema.parse(payload)
+      const input = parsed.data
       const accountIds = input && 'accountIds' in input && Array.isArray(input.accountIds) && input.accountIds.length
         ? input.accountIds.filter((id): id is string => typeof id === 'string')
         : input && 'accountId' in input && typeof input.accountId === 'string' ? [input.accountId] : []
       const keys = [...new Set(accountIds)].map(id => `account:${id}`)
-      if (name === 'addSmtpAccount' || name === 'removeAccount' || name === 'listAccounts') keys.push('account-registry')
+      if (name === 'addSmtpAccount' || name === 'updateSmtpAccount' || name === 'removeAccount' || name === 'listAccounts') keys.push('account-registry')
       const bytes = new TextEncoder().encode(JSON.stringify(input ?? null)).length
       return { ok: true, data: await work.run(keys, bytes, async () => {
         operation?.cancellation.throwIfAborted()
-        const context = operation ? { ...scope, ...emailStoreContext(operation.api.data), network: operation.api.network, credentials: operation.api.credentials, accounts: operation.api.accounts } : scope
+        const context = operation ? { ...scope, ...emailStoreContext(operation.api.data), network: operation.api.network, credentials: operation.api.credentials, accounts: operation.api.accounts, services: operation.api.services } : scope
         return method.run(context, input)
       }) }
     } catch (error) {
       return { ok: false, error: error instanceof Error ? error.message : 'Mail operation failed.',
-        ...(error instanceof RemoteMailCacheError ? { outcome: 'remote-complete' as const, data: error.result } : {}) }
+        ...(error instanceof RemoteMailCacheError ? { outcome: 'remote-complete' as const, data: error.result } : {}),
+        ...(error instanceof MailRefusal ? { code: error.code, outcome: error.outcome } : {}) }
     }
   }
-    const operation = api.rpc.handleOperation?.(`command.${name}`, handler)
+    const operation = workflow ? workflow.operation(`command.${name}`, handler) : api.rpc.handleOperation?.(`command.${name}`, handler)
     const existingOperation = ['queryMessages', 'readMessage'].includes(name) ? api.rpc.handleOperation?.(name, handler) : undefined
     const rpc = ['queryMessages', 'readMessage'].includes(name) && operation ? undefined : api.rpc.handle(name, handler)
     return () => { operation?.(); existingOperation?.(); rpc?.() }
@@ -382,10 +422,15 @@ export function register(api: MailBackendApi): () => Promise<void> {
   }
   const timer = api.notifications ? setInterval(poll, 60_000) : undefined
   const offResume = api.lifecycle?.onResume(poll)
-  poll()
+  let initialPoll: ReturnType<typeof setTimeout> | undefined
+  const startPolling = () => { if (!disposed && api.notifications) initialPoll = setTimeout(poll, 0) }
+  if (workflow) void workflow.ready.then(startPolling, startPolling)
+  else startPolling()
   return () => {
     if (draining) return draining
     disposed = true
+    workflow?.dispose()
+    clearTimeout(initialPoll)
     clearInterval(timer)
     offResume?.()
     const accepted = work.dispose()

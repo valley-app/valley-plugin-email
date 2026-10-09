@@ -1,3 +1,4 @@
+import { commandRegistrar, emailResults } from './commandResults'
 import { AGENT_TOOL_PROVIDER_V1, SEARCH_RESULT_ACTION_V1, type ValleyPluginApi, type ValleyPluginModule } from '@valley/plugin-sdk'
 import { initRuntime, React } from './runtime'
 import { injectStyles } from './styles'
@@ -18,7 +19,8 @@ export function register(api: ValleyPluginApi): () => Promise<void> {
   // Instantiate the window-anchored store eagerly so account state loads.
   const store = getStore(api)
   const offLinkHandler = api.links.register({
-    id: 'compose', label: api.ui.t('manifest.name'), version: '1.0.0', categories: ['email'], schemes: ['mailto'],
+    id: 'compose',
+    label: api.ui.t('manifest.name'), version: '1.0.0', categories: ['email'], schemes: ['mailto'],
     open: async ({ value }) => {
       await store.whenReady
       const url = new URL(value)
@@ -66,32 +68,54 @@ export function register(api: ValleyPluginApi): () => Promise<void> {
   api.registerView('email.page', Page)
   api.registerView('email.settings', Settings)
 
-  const offCompose = api.commands.register({
+  const notApplied = (code: string, message: string): never => { throw Object.assign(new Error(message), { code, outcome: 'not-applied' as const }) }
+  const offCompose = commandRegistrar(api)({
     id: 'compose',
+    outputSchema: emailResults['compose'],
     label: 'Email: Compose', labelKey: 'auto.0a3f4e087378',
-    sideEffect: 'read',
-    run: () => {
-      getStore(api).startCompose()
+    sideEffect: 'execute',
+    run: async () => {
+      const composer = getStore(api)
+      await composer.whenReady.catch(() => undefined)
+      const before = composer.getSnapshot()
+      if (before.sending) notApplied('COMPOSE_SENDING', 'The open email draft is being sent.')
+      if (!before.compose && !before.selectedAccountId) notApplied('ACCOUNT_UNAVAILABLE', 'No email account is available for composing.')
+      await composer.startCompose()
+      const after = composer.getSnapshot()
+      if (!after.composing || !after.compose) notApplied('COMPOSE_UNAVAILABLE', 'The email draft could not be opened.')
       api.workspace.openMainTab()
-      return undefined
+      return null
     }
   })
-  const offOpen = api.commands.register({
+  const offCloseCompose = commandRegistrar(api)({
+    id: 'close-compose',
+    outputSchema: emailResults['close-compose'],
+    label: 'Email: Close compose', labelKey: 'email.command.closeCompose',
+    sideEffect: 'execute',
+    run: async () => {
+      const composer = getStore(api)
+      await composer.whenReady.catch(() => undefined)
+      return composer.closeCompose()
+    }
+  })
+  const offOpen = commandRegistrar(api)({
     id: 'open-mailbox',
+    outputSchema: emailResults['open-mailbox'],
     label: 'Email: Open mailbox', labelKey: 'auto.ddf53deccb65',
     sideEffect: 'read',
     run: () => {
       api.workspace.openMainTab()
-      return undefined
+      return null
     }
   })
-  const offSync = api.commands.register({
+  const offSync = commandRegistrar(api)({
     id: 'sync',
+    outputSchema: emailResults['sync'],
     label: 'Email: Sync folder', labelKey: 'auto.03820524c5cb',
     sideEffect: 'write',
     run: async () => {
       await getStore(api).sync()
-      return { value: undefined, revert: null }
+      return { value: null, revert: null }
     }
   })
   const offFence = registerEmailFence()
@@ -102,6 +126,7 @@ export function register(api: ValleyPluginApi): () => Promise<void> {
     offNotification()
     offFlush()
     offCompose()
+    offCloseCompose()
     offOpen()
     offSync()
     offFence()

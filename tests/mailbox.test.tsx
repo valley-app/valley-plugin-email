@@ -955,3 +955,70 @@ it('cancels superseded reader operations and retains the latest message', async 
   release()
   await waitFor(() => expect(store.getSnapshot().selectedMessage).toBeNull())
 })
+
+it('closes an email:compose draft through the public close-compose inverse without discarding edits', async () => {
+  const mock = setup()
+  const store = getStore()
+  await store.whenReady
+  const confirm = vi.spyOn(mock.api.ui, 'confirm')
+  const command = (id: string) => mock.api.commands.list().find((entry) => entry.id === `email:${id}`)
+  expect([command('compose')?.sideEffect, command('close-compose')?.sideEffect]).toEqual(['execute', 'execute'])
+  expect(store.getSnapshot()).toMatchObject({ compose: null, composing: false })
+  expect(await mock.api.commands.executeOwn('compose')).toEqual({ ok: true, value: null })
+  expect(store.getSnapshot()).toMatchObject({ composing: true, compose: { mode: 'new', dirty: false, accountId: 'one' } })
+  expect(await mock.api.commands.executeOwn('close-compose')).toEqual({ ok: true, value: { discarded: true } })
+  expect(store.getSnapshot()).toMatchObject({ compose: null, composing: false })
+  expect((await mock.api.data.dataset('drafts').read({ id: 'compose' })).value).toBeNull()
+  await expect(store.closeCompose()).rejects.toMatchObject({ code: 'COMPOSE_NOT_OPEN', outcome: 'not-applied' })
+  expect(await mock.api.commands.executeOwn('close-compose')).toMatchObject({ ok: false })
+
+  expect(await mock.api.commands.executeOwn('compose')).toMatchObject({ ok: true })
+  store.updateDraft({ text: 'Canopy field notes' })
+  await store.flushDraft()
+  const saved = await mock.api.data.dataset('drafts').read({ id: 'compose' })
+  expect(await mock.api.commands.executeOwn('close-compose')).toEqual({ ok: true, value: { discarded: false } })
+  expect(store.getSnapshot()).toMatchObject({ composing: false, compose: { text: 'Canopy field notes', dirty: true } })
+  expect(await mock.api.data.dataset('drafts').read({ id: 'compose' })).toEqual(saved)
+  expect(await mock.api.commands.executeOwn('compose')).toMatchObject({ ok: true })
+  expect(store.getSnapshot()).toMatchObject({ composing: true, compose: { text: 'Canopy field notes' } })
+  expect(confirm).not.toHaveBeenCalled()
+})
+
+it('refuses email:compose as not applied when no account can send', async () => {
+  const mock = setup()
+  mock.mail.listAccounts = async () => ({ ok: true, data: { accounts: [] } })
+  await getStore().refreshAccounts()
+  expect(getStore().getSnapshot().selectedAccountId).toBeNull()
+  const run = vi.spyOn(mock.api.workspace, 'openMainTab')
+  expect(await mock.api.commands.executeOwn('compose')).toMatchObject({ ok: false, error: { message: 'No email account is available for composing.' } })
+  expect(getStore().getSnapshot()).toMatchObject({ compose: null, composing: false })
+  expect(run).not.toHaveBeenCalled()
+})
+
+it('undoes an update-properties flag edit exactly through its registered revert', async () => {
+  let flags: string[] = ['\\Flagged']
+  const mock = setup(Promise.resolve(), {}, (configured) => {
+    configured.mail.readMessage = vi.fn(async () => ({ ok: true, data: { message: { ...message, flags: [...flags] } } }))
+    configured.mail.applyMessageAction = vi.fn(async (input) => {
+      const flag = input.action === 'flag' || input.action === 'unflag' ? '\\Flagged' : '\\Seen'
+      flags = input.action === 'mark-read' || input.action === 'flag' ? [...new Set([...flags, flag])].sort() : flags.filter((entry) => entry !== flag)
+      return { ok: true, data: { action: input.action, folder: input.folder, messages: [{ ...message, flags: [...flags] }] } }
+    })
+  })
+  const store = getStore()
+  await store.restoreSelection({ accountIds: ['one'], view: 'folder', folder: 'INBOX', message: { accountId: 'one', folder: 'INBOX', uid: 7 } })
+  const surface = mock.api.interop.extensions.providers(PLUGIN_SURFACE_V1)[0].extension.getSnapshot()!
+  const subject = { pluginId: 'email', surface: 'main_workspace' as const, view: surface.view, item: surface.item }
+  vi.mocked(mock.mail.applyMessageAction).mockClear()
+  expect(await mock.api.commands.executeOwn('update-properties', { subject, values: { read: true, flagged: true } })).toMatchObject({ ok: true })
+  expect(flags).toEqual(['\\Flagged', '\\Seen'])
+  expect(mock.busUndo).toHaveLength(1)
+  await mock.busUndo[0].undo()
+  expect(flags).toEqual(['\\Flagged'])
+  expect(vi.mocked(mock.mail.applyMessageAction).mock.calls.map(([input]) => input.action)).toEqual(['mark-read', 'flag', 'mark-unread'])
+  await mock.busUndo[0].redo!()
+  expect(flags).toEqual(['\\Flagged', '\\Seen'])
+  flags = []
+  await expect(mock.busUndo[0].undo()).rejects.toMatchObject({ code: 'REVISION_CONFLICT', outcome: 'not-applied' })
+  expect(vi.mocked(mock.mail.applyMessageAction)).toHaveBeenCalledTimes(4)
+})
