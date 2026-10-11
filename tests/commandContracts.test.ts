@@ -2,16 +2,20 @@ import { expect, it } from 'vitest'
 import { commandContracts } from './commandContracts'
 
 it('publishes distinct typed input and output contracts for every background action', () => {
-  expect(commandContracts).toHaveLength(12)
+  expect(commandContracts).toHaveLength(15)
   expect(new Set(commandContracts.map(entry => entry.command.id)).size).toBe(commandContracts.length)
   for (const entry of commandContracts) expect(entry.output({ unexpected: 'not an owner result' }), entry.command.id).toBe(false)
 })
 
-it('declares account removal as an irreversible execute without an undo hook', () => {
+it('declares account removal as a non-replayable execute whose inverse is the public restoreAccount write', () => {
   const removal = commandContracts.find(entry => entry.command.id === 'removeAccount')!.command
   expect(removal).toMatchObject({ effect: 'execute', recovery: 'non-replayable' })
   expect(removal.undoMethod).toBeUndefined()
   expect(removal.revisionMethod).toBeUndefined()
+  const restore = commandContracts.find(entry => entry.command.id === 'restoreAccount')!
+  expect(restore.command).toMatchObject({ effect: 'write', result: 'driver' })
+  expect(restore.command.undoMethod).toBeUndefined()
+  for (const id of ['restoreSyncState', 'forgetCachedMessage']) expect(commandContracts.find(entry => entry.command.id === id)!.command).toMatchObject({ effect: 'write', result: 'driver' })
   const addition = commandContracts.find(entry => entry.command.id === 'addSmtpAccount')!.command
   expect(addition.effect).toBe('execute')
 })

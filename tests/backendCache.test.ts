@@ -9,6 +9,7 @@ import { cacheMailboxes, cachedMailboxes, parseEmailAddresses, queryMessages, re
 import { register, type MailBackendApi } from '../src/backend'
 import type { CachedMessage, EmailAccount } from '../src/mailTypes'
 import { encodeText } from '../src/backend/encoding'
+import { commandContracts } from './commandContracts'
 import { identifyMessage } from '../src/backend/identity'
 
 const message: CachedMessage = { uid: 7, messageId: '<canopy@example.test>', from: 'Canopy <canopy@example.test>', to: 'reader@example.test', subject: 'Canopy survey', date: '2026-09-09T10:00:00.000Z', snippet: 'Forest', text: 'Rare forest orchid', flags: [], hasAttachments: false }
@@ -114,6 +115,18 @@ describe('package-owned mail data and RPC', () => {
     expect((await readFolder(scope, 'station', 'Archive')).map((entry) => entry.uid).sort((a, b) => a - b)).toEqual([80, 81, 100])
     expect((await readFolder(scope, 'station', 'INBOX')).map((entry) => entry.uid)).toEqual([8])
     expect(await readFolder(scope, 'other', 'INBOX')).toMatchObject([message])
+  })
+
+  it('returns applyMessageAction messages in the published output schema', async () => {
+    const contract = commandContracts.find(entry => entry.command.id === 'applyMessageAction')!
+    const valid = (messages: CachedMessage[], destinationFolder?: string) => contract.output(JSON.parse(JSON.stringify({ action: 'flag', folder: 'INBOX', messages, destinationFolder })))
+    await mergeFolder(scope, 'station', 'INBOX', [message, { ...message, uid: 8, messageId: '<moss@example.test>' }])
+    const flagged = await updateMessageFlags(scope, 'station', 'INBOX', 7, ['\\Flagged'])
+    expect(valid(flagged), JSON.stringify(contract.output.errors)).toBe(true)
+    expect(flagged).toEqual(await readFolder(scope, 'station', 'INBOX').then(rows => rows.filter(row => row.uid === 7)))
+    expect(flagged[0].flags).toEqual(['\\Flagged'])
+    const moved = await moveCachedMessage(scope, 'station', 'INBOX', 'Archive', 7, 100)
+    expect(valid(moved, 'Archive'), JSON.stringify(contract.output.errors)).toBe(true)
   })
 
   it('counts only live memberships and appends without rereading existing mail', async () => {

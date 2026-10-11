@@ -6,7 +6,7 @@ import { uiText } from './localization'
 import { createDraftRepository, type RetainedDraft } from './draftRepository'
 
 interface DraftPorts {
-  snapshot(): Pick<EmailSnapshot, 'compose' | 'composing' | 'sending' | 'selectedAccountId' | 'accounts'>
+  snapshot(): Pick<EmailSnapshot, 'compose' | 'composing' | 'sending' | 'selectedAccountId' | 'accounts' | 'error'>
   active(): boolean
   set(patch: Partial<EmailSnapshot>): void
   report(error: unknown): void
@@ -169,6 +169,23 @@ export function createDraftController(api: ValleyPluginApi, ports: DraftPorts, r
     ports.updateTitle()
     return { discarded: blank }
   }
+  /** Undo one compose command: put back the observed compose fields, discarding the draft it created. */
+  async function revertCompose(previous: Pick<EmailSnapshot, 'compose' | 'composing' | 'error'>, created: number | null): Promise<void> {
+    const refuse = (code: string, message: string): never => { throw Object.assign(new Error(message), { code, outcome: 'not-applied' as const }) }
+    const owned = (): ComposeDraft | null => {
+      const snapshot = ports.snapshot()
+      if (!current()) refuse('COMPOSE_UNAVAILABLE', 'The email window is no longer active.')
+      if (snapshot.sending) refuse('COMPOSE_SENDING', 'The open email draft is being sent.')
+      if ((snapshot.compose?.id ?? null) !== (created ?? previous.compose?.id ?? null)) refuse('REVISION_CONFLICT', 'The email draft changed since compose opened it.')
+      return snapshot.compose
+    }
+    const draft = owned()
+    ++generation
+    if (created !== null && draft && !await repository.clear(draft)) refuse('REVISION_CONFLICT', 'The saved email draft changed since compose opened it.')
+    if (owned() !== draft) refuse('REVISION_CONFLICT', 'The email draft changed while compose was undone.')
+    ports.set({ ...(created !== null ? { compose: previous.compose } : {}), composing: previous.composing, error: previous.error })
+    ports.updateTitle()
+  }
   function send(): Promise<boolean> {
     const draft = ports.snapshot().compose
     if (!current() || !draft || ports.snapshot().sending || !draft.to.length || Object.values(draft.pending).some((value) => value.trim())) return Promise.resolve(false)
@@ -208,7 +225,7 @@ export function createDraftController(api: ValleyPluginApi, ports: DraftPorts, r
     await repository.flush()
   }
   return {
-    whenReady, startCompose, updateDraft, saveDraft, cancelCompose, closeCompose, send, flush,
+    whenReady, startCompose, updateDraft, saveDraft, cancelCompose, closeCompose, revertCompose, send, flush,
     dispose(): Promise<void> {
       if (draining) return draining
       active = false

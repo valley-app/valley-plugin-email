@@ -16,6 +16,8 @@ interface MailboxPorts {
 }
 
 type NavigationEntry = { accountId: string | null; accountIds: string[]; folder: string; view: EmailMailboxView; message: EmailMessageRef | null }
+/** What open-selection replaces, so its revert can put the exact selection and history back. */
+export interface EmailNavigation { selection: EmailSelection; history: NavigationEntry[]; historyIndex: number; composing: boolean; error: string | null }
 
 export function createMailboxController(mail: EmailDriver, ports: MailboxPorts) {
   let history: NavigationEntry[] = []
@@ -98,8 +100,19 @@ export function createMailboxController(mail: EmailDriver, ports: MailboxPorts) 
     if (recordHistory) pushHistory()
     return true
   }
+  function captureNavigation(): EmailNavigation {
+    const state = ports.snapshot(), message = state.selectedMessage
+    return { selection: { accountIds: [...state.selectedAccountIds], view: state.view, folder: state.selectedFolder, query: state.query, ...(message ? { message: { accountId: message.accountId, folder: message.folder, uid: message.uid } } : {}) },
+      history: [...history], historyIndex, composing: state.composing, error: state.error }
+  }
+  async function restoreNavigation(saved: EmailNavigation): Promise<void> {
+    if (!await restoreSelection(saved.selection, false)) throw Object.assign(new Error('The Email selection changed while it was restored.'), { code: 'REVISION_CONFLICT', outcome: 'not-applied' as const })
+    history = [...saved.history]; historyIndex = saved.historyIndex
+    ports.set({ composing: saved.composing && Boolean(ports.snapshot().compose), error: saved.error })
+    ports.updateTitle()
+  }
   return {
-    selectAccount, selectAccounts, selectView, restoreSelection, pushHistory,
+    selectAccount, selectAccounts, selectView, restoreSelection, pushHistory, captureNavigation, restoreNavigation,
     initialHistory: () => { if (!history.length) pushHistory() },
     goBack: () => goHistory(-1), goForward: () => goHistory(1),
     historyState: () => ({ canGoBack: historyIndex > 0, canGoForward: historyIndex < history.length - 1 }),

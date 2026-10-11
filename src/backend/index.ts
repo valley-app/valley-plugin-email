@@ -3,7 +3,7 @@ import { z } from 'zod'
 import type { PluginDataApi, PluginBackendApi, PluginBackendOperationContext } from '@valley/plugin-sdk'
 import type { EmailAccount, CachedMessage } from '../mailTypes'
 import { cacheMailboxes, cachedMailboxes, parseEmailAddresses, queryMessages, readMessage } from './query'
-import { readAccounts as readEmailAccounts, upsertAccount, getAccount as getEmailAccount, removeAccountFiles, readFolder, mergeFolder, establishFolderEpoch, appendMessage, folderCacheStats, updateMessageFlags, moveCachedMessage, emailStoreContext, type EmailStoreContext } from './cache'
+import { readAccounts as readEmailAccounts, upsertAccount, getAccount as getEmailAccount, removeAccountFiles, readFolder, mergeFolder, establishFolderEpoch, appendMessage, folderCacheStats, updateMessageFlags, moveCachedMessage, emailStoreContext, captureAccountRestore, restoreAccountFiles, forgetCachedMessage, type EmailStoreContext } from './cache'
 import { accountEndpoint, credentialName, MAIL_CREDENTIAL_STORE, verifyImap, verifySmtp, mailDiagnostic, listFolders, fetchFolder, sendMail, applyMessageAction as applyRemoteMessageAction, type MailTransportApi } from './transport'
 import { createMailWorkQueue } from './workQueue'
 import { automationHeaders, MailRefusal, prepareAutomaticMail, type MailAutomationServices } from './automation'
@@ -25,6 +25,9 @@ class RemoteMailCacheError extends Error {
 const hostSchema = z.object({ host: z.string().min(1), port: z.number().int().positive(), secure: z.boolean() })
 
 const accountId = (provider: string): string => `${provider}-${crypto.randomUUID()}`
+// Validated but kept as given, so accounts.json gets back the removed record's exact key order.
+const restoredAccountSchema = z.object({ id: z.string().regex(/^pureemail-[0-9a-f-]{36}$/), provider: z.literal('pureemail'), address: z.string().email(), imap: hostSchema, smtp: hostSchema, createdAt: z.number() }).passthrough()
+const syncStateSchema = z.object({ uidValidity: z.number().int().positive().nullable(), cursor: z.string().max(32).nullable(), lastSyncAt: z.string().max(64).nullable() })
 
 async function centralMailAccounts(scope: MailBackendContext): Promise<EmailAccount[]> {
   const hosts = {
@@ -124,11 +127,27 @@ const methods = {
       // Google/Microsoft accounts are managed in Settings → Accounts, so an id
       // without a local record is refused before any credential or cache change.
       if (!await getEmailAccount(scope, id)) throw new MailRefusal('ACCOUNT_NOT_FOUND', scope.t('email.backend.account'))
+      // A stored password cannot be read back, so only a credential-less removal returns its exact restoreAccount input.
+      const restore = await scope.credentials.presence(credentialName(id), MAIL_CREDENTIAL_STORE) === 'absent' ? await captureAccountRestore(scope, id) : null
       await scope.credentials.delete(credentialName(id), MAIL_CREDENTIAL_STORE)
       await removeAccountFiles(scope, id)
       const central = await centralMailAccounts(scope)
       const local = (await readEmailAccounts(scope)).filter((a) => a.provider === 'pureemail')
-      return { accounts: [...central, ...local] }
+      return { accounts: [...central, ...local], restore }
+    }),
+
+  restoreAccount: mailMethod(z.object({ restore: z.object({
+      index: z.number().int().nonnegative(),
+      account: z.record(z.unknown()).refine((value) => restoredAccountSchema.safeParse(value).success, 'Invalid account record.'),
+      folderMessages: z.array(z.record(z.unknown())).max(20000), messages: z.array(z.record(z.unknown())).max(20000)
+    }).strict() }).strict(), async (scope, { restore }) => {
+      const id = String(restore.account.id)
+      if ([...restore.folderMessages, ...restore.messages].some((row) => row.accountId !== id)) throw new MailRefusal('INVALID_INPUT', scope.t('email.backend.account'))
+      if (await scope.credentials.presence(credentialName(id), MAIL_CREDENTIAL_STORE) !== 'absent') throw new MailRefusal('ACCOUNT_EXISTS', scope.t('email.backend.accountsChanged'))
+      const accounts = await restoreAccountFiles(scope, restore as unknown as Parameters<typeof restoreAccountFiles>[1])
+      if (!accounts) throw new MailRefusal('ACCOUNT_EXISTS', scope.t('email.backend.accountsChanged'))
+      const central = await centralMailAccounts(scope)
+      return { account: restore.account as unknown as EmailAccount, accounts: [...central, ...accounts.filter((a) => a.provider === 'pureemail')] }
     }),
 
   testAccount: mailMethod(z.object({ accountId: z.string().min(1).max(4096) }).strict(), async (scope, payload) => {
@@ -215,6 +234,23 @@ const methods = {
         })
         throw err
       }
+    }),
+
+  restoreSyncState: mailMethod(z.object({ accountId: z.string().min(1), folder: z.string().min(1), expected: syncStateSchema.nullable(), previous: syncStateSchema.nullable() }).strict(), async (scope, input) => {
+      if (!await resolveAccount(scope, input.accountId)) throw new MailRefusal('ACCOUNT_NOT_FOUND', scope.t('email.backend.account'))
+      const key = { accountId: input.accountId, folder: input.folder }, current = await scope.data.dataset('sync_state').get(key)
+      const state = (row: Record<string, unknown> | null | undefined) => row ? { uidValidity: typeof row.uidValidity === 'number' ? row.uidValidity : null, cursor: typeof row.cursor === 'string' ? row.cursor : null, lastSyncAt: typeof row.lastSyncAt === 'string' ? row.lastSyncAt : null } : null
+      if (JSON.stringify(state(current)) !== JSON.stringify(state(input.expected))) throw new MailRefusal('REVISION_CONFLICT', scope.t('email.backend.mailboxChanged'))
+      if (input.previous) await scope.data.dataset('sync_state').upsert({ ...key, ...state(input.previous) })
+      else if (current) await scope.data.dataset('sync_state').delete(key)
+      return { syncState: input.previous ? { ...key, ...state(input.previous) } : null }
+    }),
+
+  forgetCachedMessage: mailMethod(z.object({ accountId: z.string().min(1), folder: z.string().min(1), uid: z.number().int().nonnegative() }).strict(), async (scope, input) => {
+      if (!await resolveAccount(scope, input.accountId)) throw new MailRefusal('ACCOUNT_NOT_FOUND', scope.t('email.backend.account'))
+      const forgotten = await forgetCachedMessage(scope, input.accountId, input.folder, input.uid)
+      if (!forgotten.removed) throw new MailRefusal('MESSAGE_NOT_FOUND', scope.t('email.selectionMissing'))
+      return { accountId: input.accountId, folder: input.folder, uid: input.uid, messageRemoved: forgotten.message }
     }),
 
   readFolder: mailMethod(z.object({ accountId: z.string().min(1), folder: z.string().min(1).default('INBOX') }), async (scope, payload) => {
@@ -337,7 +373,8 @@ export function register(api: MailBackendApi): () => Promise<void> {
         ? input.accountIds.filter((id): id is string => typeof id === 'string')
         : input && 'accountId' in input && typeof input.accountId === 'string' ? [input.accountId] : []
       const keys = [...new Set(accountIds)].map(id => `account:${id}`)
-      if (name === 'addSmtpAccount' || name === 'updateSmtpAccount' || name === 'removeAccount' || name === 'listAccounts') keys.push('account-registry')
+      if (name === 'restoreAccount' && input && 'restore' in input) keys.push(`account:${String((input.restore as { account: { id: unknown } }).account.id)}`)
+      if (name === 'addSmtpAccount' || name === 'updateSmtpAccount' || name === 'removeAccount' || name === 'restoreAccount' || name === 'listAccounts') keys.push('account-registry')
       const bytes = new TextEncoder().encode(JSON.stringify(input ?? null)).length
       return { ok: true, data: await work.run(keys, bytes, async () => {
         operation?.cancellation.throwIfAborted()

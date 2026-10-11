@@ -10,7 +10,7 @@ import { createAccountsController } from './accountsController'
 import { createDraftController } from './draftController'
 import type { RetainedDraft } from './draftRepository'
 import { createMessageController, messageKey } from './messageController'
-import { createMailboxController } from './mailboxController'
+import { createMailboxController, type EmailNavigation } from './mailboxController'
 export { messageKey } from './messageController'
 import type { EmailAddress, EmailFilters, EmailMailboxView, EmailMessageAction, EmailMessageDetail, EmailMessageRef, EmailMessageSummary } from './mailTypes'
 import { api } from './runtime'
@@ -91,11 +91,14 @@ export interface EmailStore {
   flushDraft(): Promise<void>
   cancelCompose(): Promise<void>
   closeCompose(): Promise<{ discarded: boolean }>
+  revertCompose(previous: Pick<EmailSnapshot, 'compose' | 'composing' | 'error'>, created: number | null): Promise<void>
   send(): Promise<boolean>
   removeAccount(accountId: string): Promise<void>
   goBack(): Promise<boolean>
   goForward(): Promise<boolean>
   restoreSelection(selection: EmailSelection): Promise<boolean>
+  captureNavigation(): EmailNavigation
+  restoreNavigation(saved: EmailNavigation): Promise<void>
 }
 
 export interface EmailSelection {
@@ -166,7 +169,7 @@ function createStore(api: ValleyPluginApi): EmailStore {
     snapshot: () => state, active: () => !disposed, set, updateTitle, clearContacts: contacts.clearSelection,
     whenReady: () => whenReady, accounts: accountsController, messages: messagesController
   })
-  const { selectAccount, selectAccounts, selectView, restoreSelection, setQuery, goBack, goForward } = mailboxController
+  const { selectAccount, selectAccounts, selectView, restoreSelection, setQuery, goBack, goForward, captureNavigation, restoreNavigation } = mailboxController
   const syncController = createSyncController(api, {
     scope: () => ({ accountIds: [...activeAccountIds()], view: state.view, folder: state.selectedFolder }),
     folders: (accountId) => state.mailboxesByAccount[accountId] ?? [],
@@ -183,7 +186,7 @@ function createStore(api: ValleyPluginApi): EmailStore {
     invalidateMessages: () => { messagesController.invalidateMessages() }, refreshMessages: () => loadMessages(),
     sent: (draft) => { if (drafts.draft === draft) drafts.draft = null }
   }, drafts, mail)
-  const { startCompose, updateDraft, saveDraft, cancelCompose, closeCompose, send } = draftController
+  const { startCompose, updateDraft, saveDraft, cancelCompose, closeCompose, revertCompose, send } = draftController
   const classification = createClassificationQueue(api, classification => set({ classification }), async () => { messagesController.invalidateMessages(); await loadMessages() })
   const projections = createEmailProjections(api, async () => { messagesController.invalidateMessages(); await loadMessages() })
   const offSync = mail.onSync((event) => {
@@ -222,14 +225,14 @@ function createStore(api: ValleyPluginApi): EmailStore {
       await api.settings.set('vipAddresses', [...values])
     },
     assignCategory: (id, categoryId) => classification.assign(id, categoryId), resetCategory: classification.reset, classifyExisting: ids => classification.enqueue(ids), retryClassification: classification.retry, cancelClassification: classification.cancel,
-    startCompose, updateDraft, saveDraft, cancelCompose, closeCompose, send, flushDraft: draftController.flush,
+    startCompose, updateDraft, saveDraft, cancelCompose, closeCompose, revertCompose, send, flushDraft: draftController.flush,
     removeAccount: async (accountId) => {
       if (disposed) return
       const result = await mail.removeAccount(accountId)
       if (!result.ok) { report(result.error || uiText('email.actionFailed')); return }
       await refreshAccounts()
     },
-    goBack, goForward, restoreSelection
+    goBack, goForward, restoreSelection, captureNavigation, restoreNavigation
   }
 }
 

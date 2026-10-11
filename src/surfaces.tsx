@@ -251,7 +251,7 @@ export function registerEmailSurfaces(pluginApi: ValleyPluginApi): () => void {
       const snap = store.getSnapshot()
       const message = snap.selectedMessage
       const view = viewState()
-      return { title: message?.subject || uiText('manifest.name'), view,
+      return { title: message?.subject || uiText('manifest.name'), view, ...(surface === 'main_workspace' ? { composing: snap.composing, error: snap.error } : {}),
         ...(message ? { item: { id: messageKey(message), title: message.subject || uiText('email.noSubject'), state: { ...view, message: { accountId: message.accountId, folder: message.folder, uid: message.uid } } }, actions: messageMenu(message) } : {}),
         navigation: { canGoBack: snap.canGoBack, canGoForward: snap.canGoForward, goBack: store.goBack, goForward: store.goForward }
       }
@@ -275,9 +275,14 @@ export function registerEmailSurfaces(pluginApi: ValleyPluginApi): () => void {
   offs.push(store.subscribe(syncMessageSegment), () => offMessage?.())
   syncMessageSegment()
   offs.push(commandRegistrar(pluginApi)({
-    id: 'open-selection', outputSchema: emailResults['open-selection'], label: 'Email: Open a mailbox or message', labelKey: 'email.command.openSelection', sideEffect: 'read', paletteSafe: false,
+    id: 'open-selection', outputSchema: emailResults['open-selection'], label: 'Email: Open a mailbox or message', labelKey: 'email.command.openSelection', sideEffect: 'write', paletteSafe: false,
     input: { schema: { type: 'object', properties: { accountIds: { type: 'array', items: { type: 'string' } }, view: { type: 'string', enum: ['folder', 'recent', 'unread', 'flagged'] }, folder: { type: 'string' }, query: { type: 'string' }, message: { type: 'object', properties: { accountId: { type: 'string' }, folder: { type: 'string' }, uid: { type: 'integer', minimum: 1 } }, required: ['accountId', 'folder', 'uid'] } }, additionalProperties: false }, parse: selection },
-    run: async (target) => { await store.restoreSelection(target); pluginApi.workspace.openMainTab(); return { ...target } }
+    run: async (target) => {
+      await store.whenReady.catch(() => undefined)
+      const previous = store.captureNavigation()
+      await store.restoreSelection(target); pluginApi.workspace.openMainTab()
+      return { value: { ...target }, revert: { label: 'Email: Open a mailbox or message', run: () => store.restoreNavigation(previous) } }
+    }
   }))
   offs.push(commandRegistrar(pluginApi)({
     id: 'update-properties', outputSchema: emailResults['update-properties'], label: 'Email: Edit Properties', labelKey: 'email.command.updateProperties', sideEffect: 'write', paletteSafe: false,

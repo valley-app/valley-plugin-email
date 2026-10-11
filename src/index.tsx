@@ -73,18 +73,20 @@ export function register(api: ValleyPluginApi): () => Promise<void> {
     id: 'compose',
     outputSchema: emailResults['compose'],
     label: 'Email: Compose', labelKey: 'auto.0a3f4e087378',
-    sideEffect: 'execute',
+    sideEffect: 'write',
     run: async () => {
       const composer = getStore(api)
       await composer.whenReady.catch(() => undefined)
       const before = composer.getSnapshot()
       if (before.sending) notApplied('COMPOSE_SENDING', 'The open email draft is being sent.')
       if (!before.compose && !before.selectedAccountId) notApplied('ACCOUNT_UNAVAILABLE', 'No email account is available for composing.')
+      const previous = { compose: before.compose, composing: before.composing, error: before.error }
       await composer.startCompose()
       const after = composer.getSnapshot()
       if (!after.composing || !after.compose) notApplied('COMPOSE_UNAVAILABLE', 'The email draft could not be opened.')
+      const created = after.compose!.id !== before.compose?.id ? after.compose!.id : null
       api.workspace.openMainTab()
-      return null
+      return { value: null, revert: { label: 'Email: Compose', run: () => composer.revertCompose(previous, created) } }
     }
   })
   const offCloseCompose = commandRegistrar(api)({

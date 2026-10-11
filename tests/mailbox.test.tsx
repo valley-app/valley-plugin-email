@@ -962,7 +962,7 @@ it('closes an email:compose draft through the public close-compose inverse witho
   await store.whenReady
   const confirm = vi.spyOn(mock.api.ui, 'confirm')
   const command = (id: string) => mock.api.commands.list().find((entry) => entry.id === `email:${id}`)
-  expect([command('compose')?.sideEffect, command('close-compose')?.sideEffect]).toEqual(['execute', 'execute'])
+  expect([command('compose')?.sideEffect, command('close-compose')?.sideEffect]).toEqual(['write', 'execute'])
   expect(store.getSnapshot()).toMatchObject({ compose: null, composing: false })
   expect(await mock.api.commands.executeOwn('compose')).toEqual({ ok: true, value: null })
   expect(store.getSnapshot()).toMatchObject({ composing: true, compose: { mode: 'new', dirty: false, accountId: 'one' } })
@@ -982,6 +982,58 @@ it('closes an email:compose draft through the public close-compose inverse witho
   expect(await mock.api.commands.executeOwn('compose')).toMatchObject({ ok: true })
   expect(store.getSnapshot()).toMatchObject({ composing: true, compose: { text: 'Canopy field notes' } })
   expect(confirm).not.toHaveBeenCalled()
+})
+
+it('undoes email:compose to the exact compose, composing and error fields it replaced', async () => {
+  const mock = setup()
+  const store = getStore()
+  await store.whenReady
+  const main = () => { const snapshot = mock.api.interop.extensions.providers(PLUGIN_SURFACE_V1).find(({ extension }) => extension.surface === 'main_workspace')!.extension.getSnapshot() as unknown as Record<string, unknown>; return { composing: snapshot.composing, error: snapshot.error } }
+  mock.mail.applyMessageAction = vi.fn(async () => ({ ok: false, error: 'Mail server unavailable' }))
+  await store.act(message, 'flag')
+  const before = { compose: store.getSnapshot().compose, composing: store.getSnapshot().composing, error: store.getSnapshot().error }
+  expect(before.error).toEqual(expect.any(String))
+  const baseline = main()
+  expect(baseline).toEqual({ composing: before.composing, error: before.error })
+  expect(await mock.api.commands.executeOwn('compose')).toEqual({ ok: true, value: null })
+  expect(store.getSnapshot()).toMatchObject({ composing: true, compose: { mode: 'new' }, error: null })
+  expect(mock.busUndo).toHaveLength(1)
+  await mock.busUndo[0].undo()
+  expect({ compose: store.getSnapshot().compose, composing: store.getSnapshot().composing, error: store.getSnapshot().error }).toEqual(before)
+  expect(main()).toEqual(baseline)
+  expect((await mock.api.data.dataset('drafts').read({ id: 'compose' })).value).toBeNull()
+
+  expect(await mock.api.commands.executeOwn('compose')).toMatchObject({ ok: true })
+  store.updateDraft({ text: 'Typed after compose' })
+  await store.flushDraft()
+  expect((await mock.api.data.dataset('drafts').read({ id: 'compose' })).value).not.toBeNull()
+  await mock.busUndo[1].undo()
+  expect(store.getSnapshot()).toMatchObject({ compose: null, composing: false })
+  expect((await mock.api.data.dataset('drafts').read({ id: 'compose' })).value).toBeNull()
+
+  expect(await mock.api.commands.executeOwn('compose')).toMatchObject({ ok: true })
+  await store.cancelCompose()
+  expect(await mock.api.commands.executeOwn('compose')).toMatchObject({ ok: true })
+  await expect(mock.busUndo[2].undo()).rejects.toMatchObject({ code: 'REVISION_CONFLICT', outcome: 'not-applied' })
+  expect(store.getSnapshot().composing).toBe(true)
+})
+
+it('undoes email:open-selection to the exact previous selection and navigation history', async () => {
+  const mock = setup()
+  const store = getStore()
+  await store.restoreSelection({ accountIds: ['one'], view: 'folder', folder: 'Archive' })
+  await store.restoreSelection({ accountIds: ['one'], view: 'folder', folder: 'INBOX', message: { accountId: 'one', folder: 'INBOX', uid: 7 } })
+  expect(await store.goBack()).toBe(true)
+  const surface = () => { const { navigation, actions: _actions, bookmark: _bookmark, bookmarkView: _view, ...rest } = mock.api.interop.extensions.providers(PLUGIN_SURFACE_V1).find(({ extension }) => extension.surface === 'main_workspace')!.extension.getSnapshot() as unknown as Record<string, any>; return { ...rest, canGoBack: navigation.canGoBack, canGoForward: navigation.canGoForward } }
+  const before = surface()
+  expect(before).toMatchObject({ view: { folder: 'Archive' }, canGoForward: true })
+  expect(mock.api.commands.list().find((entry) => entry.id === 'email:open-selection')?.sideEffect).toBe('write')
+  expect(await mock.api.commands.executeOwn('open-selection', { accountIds: ['two'], view: 'unread', folder: 'INBOX' })).toMatchObject({ ok: true, value: { accountIds: ['two'], view: 'unread' } })
+  expect(surface()).toMatchObject({ view: { accountIds: ['two'], view: 'unread' }, canGoForward: false })
+  await mock.busUndo[0].undo()
+  expect(surface()).toEqual(before)
+  expect(await store.goForward()).toBe(true)
+  expect(store.getSnapshot()).toMatchObject({ selectedFolder: 'INBOX', selectedUid: 7 })
 })
 
 it('refuses email:compose as not applied when no account can send', async () => {

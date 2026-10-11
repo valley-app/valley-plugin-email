@@ -723,6 +723,12 @@
             "syncFolder": {
               "decision": "allow"
             },
+            "restoreSyncState": {
+              "decision": "allow"
+            },
+            "forgetCachedMessage": {
+              "decision": "allow"
+            },
             "readFolder": {
               "decision": "confirm",
               "allowPreApproval": false
@@ -746,6 +752,10 @@
               "allowPreApproval": false
             },
             "removeAccount": {
+              "decision": "confirm",
+              "allowPreApproval": false
+            },
+            "restoreAccount": {
               "decision": "confirm",
               "allowPreApproval": false
             },
@@ -857,6 +867,12 @@
             "syncFolder": {
               "decision": "allow"
             },
+            "restoreSyncState": {
+              "decision": "deny"
+            },
+            "forgetCachedMessage": {
+              "decision": "deny"
+            },
             "readFolder": {
               "decision": "allow"
             },
@@ -876,6 +892,9 @@
               "decision": "deny"
             },
             "removeAccount": {
+              "decision": "deny"
+            },
+            "restoreAccount": {
               "decision": "deny"
             },
             "sendEmail": {
@@ -977,6 +996,12 @@
             "syncFolder": {
               "decision": "deny"
             },
+            "restoreSyncState": {
+              "decision": "deny"
+            },
+            "forgetCachedMessage": {
+              "decision": "deny"
+            },
             "readFolder": {
               "decision": "deny"
             },
@@ -996,6 +1021,9 @@
               "decision": "deny"
             },
             "removeAccount": {
+              "decision": "deny"
+            },
+            "restoreAccount": {
               "decision": "deny"
             },
             "sendEmail": {
@@ -1581,7 +1609,7 @@
         "metadata": {
           "command": {
             "id": "removeAccount",
-            "description": "Remove a local mail account and its cached messages. Irreversible: the stored password is deleted from protected host storage (it is never readable back) and cached mail can only be refetched by a new sync, so there is no undo; re-adding the mailbox through addSmtpAccount creates a new account ID. An id without a locally stored account (including Settings \u2192 Accounts mailboxes) is refused with ACCOUNT_NOT_FOUND before anything changes.",
+            "description": "Remove a local mail account and its cached messages. The stored password is deleted from protected host storage (it is never readable back) and cannot be restored; re-adding the mailbox through addSmtpAccount creates a new account ID. When the account had no stored password, the result's restore field holds the removed account record and its cached messages and memberships (null when that exceeds 256 KiB), which restoreAccount re-inserts exactly; otherwise restore is null. An id without a locally stored account (including Settings \u2192 Accounts mailboxes) is refused with ACCOUNT_NOT_FOUND before anything changes.",
             "effect": "execute",
             "recovery": "non-replayable",
             "inputSchema": {
@@ -1690,9 +1718,215 @@
                     ],
                     "additionalProperties": false
                   }
+                },
+                "restore": {
+                  "anyOf": [
+                    {
+                      "type": "object",
+                      "properties": {
+                        "index": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "account": {
+                          "type": "object"
+                        },
+                        "folderMessages": {
+                          "type": "array",
+                          "maxItems": 20000,
+                          "items": {
+                            "type": "object"
+                          }
+                        },
+                        "messages": {
+                          "type": "array",
+                          "maxItems": 20000,
+                          "items": {
+                            "type": "object"
+                          }
+                        }
+                      },
+                      "required": [
+                        "index",
+                        "account",
+                        "folderMessages",
+                        "messages"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
                 }
               },
               "required": [
+                "accounts"
+              ],
+              "additionalProperties": false
+            }
+          }
+        }
+      },
+      {
+        "id": "command.restoreAccount",
+        "version": "1.0.0",
+        "method": "command.restoreAccount",
+        "operation": true,
+        "request": {
+          "type": "unknown"
+        },
+        "response": {
+          "type": "unknown"
+        },
+        "metadata": {
+          "command": {
+            "id": "restoreAccount",
+            "description": "Re-insert a local mail account removed by removeAccount, exactly as captured in that result's restore field: the account record at its former position and its cached messages and memberships. Refused with ACCOUNT_EXISTS before anything changes when the account, a password for it or any of its cached rows exists again. No password is restored; the account stays without a stored credential.",
+            "effect": "write",
+            "inputSchema": {
+              "$schema": "http://json-schema.org/draft-07/schema#",
+              "type": "object",
+              "properties": {
+                "restore": {
+                  "type": "object",
+                  "properties": {
+                    "index": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "account": {
+                      "type": "object"
+                    },
+                    "folderMessages": {
+                      "type": "array",
+                      "maxItems": 20000,
+                      "items": {
+                        "type": "object"
+                      }
+                    },
+                    "messages": {
+                      "type": "array",
+                      "maxItems": 20000,
+                      "items": {
+                        "type": "object"
+                      }
+                    }
+                  },
+                  "required": [
+                    "index",
+                    "account",
+                    "folderMessages",
+                    "messages"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "restore"
+              ],
+              "additionalProperties": false
+            },
+            "result": "driver",
+            "outputSchema": {
+              "$schema": "http://json-schema.org/draft-07/schema#",
+              "type": "object",
+              "properties": {
+                "account": {
+                  "type": "object"
+                },
+                "accounts": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "id": {
+                        "type": "string"
+                      },
+                      "provider": {
+                        "type": "string"
+                      },
+                      "address": {
+                        "type": "string"
+                      },
+                      "displayName": {
+                        "type": "string"
+                      },
+                      "imap": {
+                        "type": "object",
+                        "properties": {
+                          "host": {
+                            "type": "string"
+                          },
+                          "port": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 65535
+                          },
+                          "secure": {
+                            "type": "boolean"
+                          }
+                        },
+                        "required": [
+                          "host",
+                          "port",
+                          "secure"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "smtp": {
+                        "type": "object",
+                        "properties": {
+                          "host": {
+                            "type": "string"
+                          },
+                          "port": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 65535
+                          },
+                          "secure": {
+                            "type": "boolean"
+                          }
+                        },
+                        "required": [
+                          "host",
+                          "port",
+                          "secure"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "createdAt": {
+                        "type": "number"
+                      },
+                      "secretState": {
+                        "enum": [
+                          "absent",
+                          "stored",
+                          "ok",
+                          "unreadable"
+                        ]
+                      },
+                      "login": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 320
+                      }
+                    },
+                    "required": [
+                      "id",
+                      "provider",
+                      "address",
+                      "imap",
+                      "smtp",
+                      "createdAt"
+                    ],
+                    "additionalProperties": false
+                  }
+                }
+              },
+              "required": [
+                "account",
                 "accounts"
               ],
               "additionalProperties": false
@@ -1851,6 +2085,292 @@
               ],
               "additionalProperties": false,
               "$schema": "http://json-schema.org/draft-07/schema#"
+            }
+          }
+        }
+      },
+      {
+        "id": "command.restoreSyncState",
+        "version": "1.0.0",
+        "method": "command.restoreSyncState",
+        "operation": true,
+        "request": {
+          "type": "unknown"
+        },
+        "response": {
+          "type": "unknown"
+        },
+        "metadata": {
+          "command": {
+            "id": "restoreSyncState",
+            "description": "Write back a folder's local sync position (UIDVALIDITY, cursor and last sync time) captured before a sync, or delete it when previous is null. Refused with REVISION_CONFLICT before anything changes unless the stored position still equals expected. Local cache only; nothing is sent to the mail server.",
+            "effect": "write",
+            "inputSchema": {
+              "$schema": "http://json-schema.org/draft-07/schema#",
+              "type": "object",
+              "properties": {
+                "accountId": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096
+                },
+                "folder": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096
+                },
+                "expected": {
+                  "anyOf": [
+                    {
+                      "type": "object",
+                      "properties": {
+                        "uidValidity": {
+                          "anyOf": [
+                            {
+                              "type": "integer",
+                              "minimum": 1
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "cursor": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "maxLength": 32
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "lastSyncAt": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "maxLength": 64
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "uidValidity",
+                        "cursor",
+                        "lastSyncAt"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "previous": {
+                  "anyOf": [
+                    {
+                      "type": "object",
+                      "properties": {
+                        "uidValidity": {
+                          "anyOf": [
+                            {
+                              "type": "integer",
+                              "minimum": 1
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "cursor": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "maxLength": 32
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "lastSyncAt": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "maxLength": 64
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "uidValidity",
+                        "cursor",
+                        "lastSyncAt"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "accountId",
+                "folder",
+                "expected",
+                "previous"
+              ],
+              "additionalProperties": false
+            },
+            "result": "driver",
+            "outputSchema": {
+              "$schema": "http://json-schema.org/draft-07/schema#",
+              "type": "object",
+              "properties": {
+                "syncState": {
+                  "anyOf": [
+                    {
+                      "type": "object",
+                      "properties": {
+                        "accountId": {
+                          "type": "string"
+                        },
+                        "folder": {
+                          "type": "string"
+                        },
+                        "uidValidity": {
+                          "anyOf": [
+                            {
+                              "type": "integer",
+                              "minimum": 1
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "cursor": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "maxLength": 32
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "lastSyncAt": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "maxLength": 64
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "accountId",
+                        "folder",
+                        "uidValidity",
+                        "cursor",
+                        "lastSyncAt"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "syncState"
+              ],
+              "additionalProperties": false
+            }
+          }
+        }
+      },
+      {
+        "id": "command.forgetCachedMessage",
+        "version": "1.0.0",
+        "method": "command.forgetCachedMessage",
+        "operation": true,
+        "request": {
+          "type": "unknown"
+        },
+        "response": {
+          "type": "unknown"
+        },
+        "metadata": {
+          "command": {
+            "id": "forgetCachedMessage",
+            "description": "Remove one message from the local cache of a folder; once no folder holds it, its cached message, recipients and attachments rows are removed too. Local cache only: the message stays on the mail server and returns with the next sync. Refused with MESSAGE_NOT_FOUND before anything changes when the folder does not cache that uid.",
+            "effect": "write",
+            "inputSchema": {
+              "$schema": "http://json-schema.org/draft-07/schema#",
+              "type": "object",
+              "properties": {
+                "accountId": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096
+                },
+                "folder": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096
+                },
+                "uid": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              },
+              "required": [
+                "accountId",
+                "folder",
+                "uid"
+              ],
+              "additionalProperties": false
+            },
+            "result": "driver",
+            "outputSchema": {
+              "$schema": "http://json-schema.org/draft-07/schema#",
+              "type": "object",
+              "properties": {
+                "accountId": {
+                  "type": "string"
+                },
+                "folder": {
+                  "type": "string"
+                },
+                "uid": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "messageRemoved": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "accountId",
+                "folder",
+                "uid",
+                "messageRemoved"
+              ],
+              "additionalProperties": false
             }
           }
         }

@@ -171,6 +171,70 @@ export async function removeAccountFiles(scope: EmailStoreContext, accountId: st
   return accounts
 }
 
+export interface AccountRestore { index: number; account: EmailAccount; folderMessages: DatasetRecord[]; messages: DatasetRecord[] }
+export const ACCOUNT_RESTORE_LIMIT = 256 * 1024
+
+/** Capture what removeAccountFiles deletes, or null when it is too large to return. */
+export async function captureAccountRestore(scope: EmailStoreContext, accountId: string): Promise<AccountRestore | null> {
+  const accounts = await readAccounts(scope), index = accounts.findIndex((a) => a.id === accountId)
+  if (index < 0) return null
+  const [folderMessages, messages] = await Promise.all([queryAll(scope, scope.datasets.folderMessages, { accountId }), queryAll(scope, scope.datasets.messages, { accountId })])
+  const restore = { index, account: accounts[index], folderMessages, messages }
+  return new TextEncoder().encode(JSON.stringify(restore)).length <= ACCOUNT_RESTORE_LIMIT ? restore : null
+}
+
+/** Re-insert a captured account and its cached rows; returns null (nothing written) when any of them exists again. */
+export async function restoreAccountFiles(scope: EmailStoreContext, restore: AccountRestore): Promise<EmailAccount[] | null> {
+  const accounts = await readAccounts(scope), id = restore.account.id
+  if (accounts.some((a) => a.id === id)) return null
+  for (const row of restore.folderMessages) if (await scope.data.dataset(scope.datasets.folderMessages).get({ accountId: id, folder: String(row.folder), uid: Number(row.uid) })) return null
+  for (const row of restore.messages) if (await scope.data.dataset(scope.datasets.messages).get({ id: String(row.id) })) return null
+  accounts.splice(Math.min(restore.index, accounts.length), 0, restore.account)
+  await writeAccounts(scope, accounts)
+  await writeOperations(scope, [
+    ...restore.messages.map((values) => ({ dataset: scope.datasets.messages, operation: 'insert' as const, values })),
+    ...restore.folderMessages.map((values) => ({ dataset: scope.datasets.folderMessages, operation: 'insert' as const, values }))
+  ])
+  return accounts
+}
+
+/** Drop one cached folder membership, and the message with its recipients and attachments once no membership is left. */
+export async function forgetCachedMessage(scope: EmailStoreContext, accountId: string, folder: string, uid: number): Promise<{ removed: boolean; message: boolean }> {
+  const membership = await scope.data.dataset(scope.datasets.folderMessages).get({ accountId, folder, uid })
+  if (!membership) return { removed: false, message: false }
+  const messageId = String(membership.messageId)
+  const others = (await queryAll(scope, scope.datasets.folderMessages, { messageId }, ['accountId', 'folder', 'uid'])).filter((row) => !(row.accountId === accountId && row.folder === folder && Number(row.uid) === uid))
+  const [recipients, attachments] = others.length ? [[], []] : await Promise.all([queryAll(scope, scope.datasets.recipients, { messageId }, ['kind', 'position']), queryAll(scope, 'attachments', { messageId }, ['position'])])
+  await writeOperations(scope, [
+    { dataset: scope.datasets.folderMessages, operation: 'delete', key: { accountId, folder, uid } },
+    ...others.length ? [] : [
+      { dataset: scope.datasets.messages, operation: 'delete' as const, key: { id: messageId } },
+      ...recipients.map((row) => ({ dataset: scope.datasets.recipients, operation: 'delete' as const, key: { messageId, kind: String(row.kind), position: Number(row.position) } })),
+      ...attachments.map((row) => ({ dataset: 'attachments', operation: 'delete' as const, key: { messageId, position: Number(row.position) } }))
+    ]
+  ])
+  if (others.length) await projectAssignments(scope, [messageId])
+  return { removed: true, message: !others.length }
+}
+
+/** The public cached-message shape of one stored message row and its folder membership. */
+function cachedMessage(message: DatasetRecord, membership: DatasetRecord): CachedMessage {
+  return {
+    complete: message.complete === true, logicalId: String(message.id), contentRevision: typeof message.contentRevision === 'string' ? message.contentRevision : undefined,
+    ...(readAutomationHeaders(message.automationHeaders) ? { automationHeaders: readAutomationHeaders(message.automationHeaders) } : {}),
+    uidValidity: typeof membership.uidValidity === 'number' ? membership.uidValidity : undefined,
+    originalDate: typeof message.originalDate === 'string' ? message.originalDate : null,
+    uid: Number(membership.uid), messageId: String(message.messageId), from: String(message.from),
+    replyTo: typeof message.replyTo === 'string' ? message.replyTo : undefined,
+    to: String(message.to), cc: typeof message.cc === 'string' ? message.cc : undefined,
+    subject: String(message.subject), date: typeof message.sortDate === 'string' ? message.sortDate : String(message.date), snippet: String(message.snippet),
+    text: typeof message.text === 'string' ? message.text : undefined,
+    html: typeof message.html === 'string' ? message.html : undefined,
+    flags: Array.isArray(membership.flags) ? membership.flags.filter((flag): flag is string => typeof flag === 'string') : [],
+    hasAttachments: message.hasAttachments === true
+  }
+}
+
 /** Read every cached message for one folder. */
 export async function readFolder(scope: EmailStoreContext, accountId: string, folder: string): Promise<CachedMessage[]> {
   try {
@@ -183,21 +247,7 @@ export async function readFolder(scope: EmailStoreContext, accountId: string, fo
     const byId = new Map(messages.map((message) => [String(message.id), message]))
     return memberships.flatMap((membership): CachedMessage[] => {
       const message = byId.get(String(membership.messageId))
-      if (!message) return []
-      return [{
-        complete: message.complete === true, logicalId: String(message.id), contentRevision: typeof message.contentRevision === 'string' ? message.contentRevision : undefined,
-        ...(readAutomationHeaders(message.automationHeaders) ? { automationHeaders: readAutomationHeaders(message.automationHeaders) } : {}),
-        uidValidity: typeof membership.uidValidity === 'number' ? membership.uidValidity : undefined,
-        originalDate: typeof message.originalDate === 'string' ? message.originalDate : null,
-        uid: Number(membership.uid), messageId: String(message.messageId), from: String(message.from),
-        replyTo: typeof message.replyTo === 'string' ? message.replyTo : undefined,
-        to: String(message.to), cc: typeof message.cc === 'string' ? message.cc : undefined,
-        subject: String(message.subject), date: typeof message.sortDate === 'string' ? message.sortDate : String(message.date), snippet: String(message.snippet),
-        text: typeof message.text === 'string' ? message.text : undefined,
-        html: typeof message.html === 'string' ? message.html : undefined,
-        flags: Array.isArray(membership.flags) ? membership.flags.filter((flag): flag is string => typeof flag === 'string') : [],
-        hasAttachments: message.hasAttachments === true
-      }]
+      return message ? [cachedMessage(message, membership)] : []
     }).sort((a, b) => (a.date < b.date ? 1 : -1))
   } catch {
     return []
@@ -250,7 +300,7 @@ export async function updateMessageFlags(
   if (changed) await scope.data.transaction([{ operation: 'update', dataset: scope.datasets.folderMessages, key: { accountId, folder, uid }, values: { flags, ...flagProjection(flags) } }])
   const row = await scope.data.dataset(scope.datasets.messages).get({ id: String(membership.messageId) })
   if (!row) return []
-  return [{ ...row, uid, logicalId: String(row.id), contentRevision: row.contentRevision, flags: [...flags], date: row.sortDate ?? row.date } as unknown as CachedMessage]
+  return [cachedMessage(row, { ...membership, uid, flags: [...flags] })]
 
 }
 
