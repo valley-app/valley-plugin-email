@@ -2,9 +2,9 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createRequire } from 'node:module'
 import { createMockValleyApi } from '@valley/plugin-testkit'
 import type { ValleyPluginManifest } from '@valley/plugin-sdk/types'
-import type { DatasetQuery } from '@valley/plugin-sdk/datasets'
+import type { DatasetQuery, DatasetTransactionOperation } from '@valley/plugin-sdk/datasets'
 import config from '../config.json'
-import { appendMessage, emailStoreContext, folderCacheStats, mergeFolder, moveCachedMessage, readAccounts, readFolder, removeAccountFiles, updateMessageFlags, upsertAccount } from '../src/backend/cache'
+import { appendMessage, cachedFolderHeaders, emailStoreContext, folderCacheStats, mergeFolder, moveCachedMessage, pruneFolder, readAccounts, readFolder, removeAccountFiles, updateMessageFlags, upsertAccount } from '../src/backend/cache'
 import { cacheMailboxes, cachedMailboxes, parseEmailAddresses, queryMessages, readMessage } from '../src/backend/query'
 import { register, type MailBackendApi } from '../src/backend'
 import type { CachedMessage, EmailAccount } from '../src/mailTypes'
@@ -355,4 +355,95 @@ it('restores the exact cached membership bytes when a flag change is inverted', 
   expect(JSON.stringify(await memberships.get(key))).toBe(before)
   await mergeFolder(scope, 'station', 'INBOX', [{ ...message, flags: ['\\Seen', '\\Flagged'] }])
   expect(JSON.stringify(await memberships.get(key))).toBe(before)
+})
+
+describe('incremental folder sync', () => {
+  const written = (spy: { mock: { calls: unknown[][] } }) => spy.mock.calls.flatMap(([operations]) => operations as DatasetTransactionOperation[])
+  const fetched: CachedMessage[] = [{ ...message, uidValidity: 3 }, { ...message, uid: 8, uidValidity: 3, messageId: '<moss@example.test>', cc: 'fern@example.test', flags: ['\\Seen'] }]
+
+  it('writes nothing when an unchanged folder is merged again, with or without bodies', async () => {
+    await mergeFolder(scope, 'station', 'INBOX', fetched)
+    const transaction = vi.spyOn(scope.data, 'transaction')
+    expect(await mergeFolder(scope, 'station', 'INBOX', fetched)).toBe(2)
+    const headers = await cachedFolderHeaders(scope, 'station', 'INBOX', [7, 8, 9], 3)
+    expect([...headers.keys()].sort()).toEqual([7, 8])
+    expect([...headers.values()].every(entry => entry.text === undefined && entry.html === undefined && Boolean(entry.logicalId))).toBe(true)
+    expect(await mergeFolder(scope, 'station', 'INBOX', [...headers.values()])).toBe(2)
+    expect(transaction).not.toHaveBeenCalled()
+    expect(await cachedFolderHeaders(scope, 'station', 'INBOX', [7, 8], 4)).toEqual(new Map())
+    expect(await cachedFolderHeaders(scope, 'station', 'INBOX', [7, 8], undefined)).toEqual(new Map())
+  })
+
+  it('updates only the membership row for a flag-only change and keeps the cached body', async () => {
+    await mergeFolder(scope, 'station', 'INBOX', fetched)
+    const [cached] = (await cachedFolderHeaders(scope, 'station', 'INBOX', [7], 3)).values()
+    const transaction = vi.spyOn(scope.data, 'transaction')
+    await mergeFolder(scope, 'station', 'INBOX', [{ ...cached, flags: ['\\Seen', '\\Flagged'] }])
+    expect(written(transaction)).toEqual([{ dataset: 'folder_messages', operation: 'upsert', values: expect.objectContaining({ accountId: 'station', folder: 'INBOX', uid: 7, flags: ['\\Flagged', '\\Seen'], unread: false, flagged: true }) }])
+    expect((await readMessage(scope, { accountId: 'station', folder: 'INBOX', uid: 7 }))?.text).toBe(message.text)
+  })
+
+  it('stores a changed body as new content with its recipients and membership', async () => {
+    await mergeFolder(scope, 'station', 'INBOX', fetched)
+    const transaction = vi.spyOn(scope.data, 'transaction')
+    await mergeFolder(scope, 'station', 'INBOX', [{ ...fetched[0], text: 'Moss survey' }])
+    const operations = written(transaction)
+    expect(operations.filter(operation => operation.dataset === 'messages' && operation.operation === 'upsert')).toEqual([expect.objectContaining({ values: expect.objectContaining({ text: 'Moss survey' }) })])
+    expect(operations.filter(operation => operation.dataset === 'recipients')).toHaveLength(1)
+    expect(operations.filter(operation => operation.dataset === 'folder_messages')).toEqual([expect.objectContaining({ operation: 'upsert', values: expect.objectContaining({ uid: 7 }) })])
+    expect((await readMessage(scope, { accountId: 'station', folder: 'INBOX', uid: 7 }))?.text).toBe('Moss survey')
+  })
+
+  it('re-projects only stale membership rows unless the special use changed', async () => {
+    await mergeFolder(scope, 'station', 'Deleted', [{ ...message, uid: 1 }, { ...message, uid: 2, messageId: '<moss@example.test>' }])
+    const mailbox = { path: 'Deleted', name: 'Deleted', selectable: true, specialUse: '\\Trash' }
+    await cacheMailboxes(scope, 'station', [mailbox])
+    expect(mock.datasets.get('renamed-mail.folder_messages')!.map(row => row.excluded)).toEqual([true, true])
+    const transaction = vi.spyOn(scope.data, 'transaction')
+    await cacheMailboxes(scope, 'station', [mailbox])
+    expect(transaction).not.toHaveBeenCalled()
+    await scope.data.dataset('folder_messages').update({ accountId: 'station', folder: 'Deleted', uid: 2 }, { projectionVersion: 0, excluded: false })
+    await cacheMailboxes(scope, 'station', [mailbox])
+    const operations = written(transaction)
+    expect(operations.filter(operation => operation.dataset !== 'messages')).toEqual([{ operation: 'update', dataset: 'folder_messages', key: { accountId: 'station', folder: 'Deleted', uid: 2 }, values: { spam: false, excluded: true, projectionVersion: 1 } }])
+    transaction.mockClear()
+    await cacheMailboxes(scope, 'station', [{ ...mailbox, specialUse: undefined }])
+    expect(written(transaction).filter(operation => operation.dataset === 'folder_messages')).toHaveLength(2)
+    expect(mock.datasets.get('renamed-mail.folder_messages')!.map(row => row.excluded)).toEqual([false, false])
+  })
+})
+
+describe('cached mail retention', () => {
+  const now = Date.parse('2026-10-13T00:00:00.000Z')
+  const old: CachedMessage = { ...message, uid: 1, messageId: '<old@example.test>', date: '2026-01-01T00:00:00.000Z', cc: 'fern@example.test' }
+  const undated: CachedMessage = { ...message, uid: 2, messageId: '<undated@example.test>', date: '' }
+  const recent: CachedMessage = { ...message, uid: 3, messageId: '<recent@example.test>', date: '2026-09-30T00:00:00.000Z' }
+  const synced: CachedMessage = { ...old, uid: 4, messageId: '<synced@example.test>' }
+
+  it('forgets messages older than the window with their recipients, keeping undated and just-synced mail', async () => {
+    await mergeFolder(scope, 'station', 'INBOX', [old, undated, recent, synced])
+    const recipients = (await scope.data.dataset('recipients').query({ limit: 100 })).rows.length
+    expect(await pruneFolder(scope, 'station', 'INBOX', [4], 180, now)).toBe(1)
+    expect((await readFolder(scope, 'station', 'INBOX')).map(entry => entry.uid).sort()).toEqual([2, 3, 4])
+    expect((await scope.data.dataset('messages').query({ limit: 100 })).rows).toHaveLength(3)
+    expect((await scope.data.dataset('recipients').query({ limit: 100 })).rows).toHaveLength(recipients - 2)
+    expect(await pruneFolder(scope, 'station', 'INBOX', [4], 180, now)).toBe(0)
+    expect(await pruneFolder(scope, 'station', 'INBOX', [], 365, now)).toBe(0)
+  })
+
+  it('keeps an old message another folder still holds and only drops this membership', async () => {
+    await mergeFolder(scope, 'station', 'INBOX', [old])
+    await mergeFolder(scope, 'station', 'Archive', [{ ...old, uid: 10 }])
+    expect(await pruneFolder(scope, 'station', 'INBOX', [], 180, now)).toBe(1)
+    expect(await readFolder(scope, 'station', 'INBOX')).toEqual([])
+    expect((await readFolder(scope, 'station', 'Archive')).map(entry => entry.uid)).toEqual([10])
+  })
+
+  it('declares retention on cached messages only and no write-less attachment stores', () => {
+    const datasets = config.datasets as Array<{ id: string; store: string; retention?: unknown }>
+    expect(datasets.filter(dataset => dataset.retention).map(dataset => [dataset.id, dataset.store, dataset.retention])).toEqual([['messages', 'cache', { column: 'date' }]])
+    expect(datasets.some(dataset => dataset.id === 'attachments')).toBe(false)
+    expect(JSON.stringify(config)).not.toContain('attachment-files')
+    expect(config.settingsSchema.fields.find(field => field.key === 'cacheDays')).toMatchObject({ default: 180, schema: { minimum: 1, maximum: 3650 } })
+  })
 })

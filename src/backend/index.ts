@@ -3,7 +3,7 @@ import { z } from 'zod'
 import type { PluginDataApi, PluginBackendApi, PluginBackendOperationContext } from '@valley/plugin-sdk'
 import type { EmailAccount, CachedMessage } from '../mailTypes'
 import { cacheMailboxes, cachedMailboxes, parseEmailAddresses, queryMessages, readMessage } from './query'
-import { readAccounts as readEmailAccounts, upsertAccount, getAccount as getEmailAccount, removeAccountFiles, readFolder, mergeFolder, establishFolderEpoch, appendMessage, folderCacheStats, updateMessageFlags, moveCachedMessage, emailStoreContext, captureAccountRestore, restoreAccountFiles, forgetCachedMessage, type EmailStoreContext } from './cache'
+import { readAccounts as readEmailAccounts, upsertAccount, getAccount as getEmailAccount, removeAccountFiles, readFolder, mergeFolder, establishFolderEpoch, appendMessage, folderCacheStats, updateMessageFlags, moveCachedMessage, emailStoreContext, captureAccountRestore, restoreAccountFiles, forgetCachedMessage, cachedFolderHeaders, pruneFolder, type EmailStoreContext } from './cache'
 import { accountEndpoint, credentialName, MAIL_CREDENTIAL_STORE, verifyImap, verifySmtp, mailDiagnostic, listFolders, fetchFolder, sendMail, applyMessageAction as applyRemoteMessageAction, type MailTransportApi } from './transport'
 import { createMailWorkQueue } from './workQueue'
 import { automationHeaders, MailRefusal, prepareAutomaticMail, type MailAutomationServices } from './automation'
@@ -16,7 +16,7 @@ interface MailRpc {
 }
 
 export interface MailBackendApi extends MailTransportApi { services?: MailAutomationServices; notifications?: PluginBackendApi['notifications']; lifecycle?: PluginBackendApi['lifecycle']; settings?: PluginBackendApi['settings']; data: PluginDataApi; rpc: MailRpc; i18n?: { t(key: string, params?: Record<string, string | number>): string } }
-interface MailBackendContext extends EmailStoreContext, MailTransportApi { services?: MailAutomationServices & Partial<Pick<PluginBackendApi['services'], 'emit'>>; notifications?: PluginBackendApi['notifications']; rpc: MailRpc; t: ReturnType<typeof createTranslator> }
+interface MailBackendContext extends EmailStoreContext, MailTransportApi { services?: MailAutomationServices & Partial<Pick<PluginBackendApi['services'], 'emit'>>; notifications?: PluginBackendApi['notifications']; settings?: PluginBackendApi['settings']; rpc: MailRpc; t: ReturnType<typeof createTranslator> }
 
 class RemoteMailCacheError extends Error {
   constructor(message: string, readonly result: unknown) { super(message) }
@@ -192,10 +192,12 @@ const methods = {
       if (!account) throw new MailRefusal('ACCOUNT_NOT_FOUND', scope.t('email.backend.account'))
       scope.rpc.emit('sync', { accountId: p.accountId, folder: p.folder, status: 'start' })
       try {
-        const { messages, uidValidity } = await fetchFolder(scope, account, p.folder, p.limit)
         const previous = await scope.data.dataset('sync_state').get({ accountId: p.accountId, folder: p.folder })
+        const { messages, uidValidity } = await fetchFolder(scope, account, p.folder, p.limit, async (uids, epoch) => previous?.uidValidity === epoch ? cachedFolderHeaders(scope, p.accountId, p.folder, uids, epoch) : new Map())
         const established = await establishFolderEpoch(scope, p.accountId, p.folder, uidValidity)
-        const count = await mergeFolder(scope, p.accountId, p.folder, messages)
+        let count = await mergeFolder(scope, p.accountId, p.folder, messages)
+        const keepDays = Number(scope.settings?.get().cacheDays)
+        if (Number.isSafeInteger(keepDays) && keepDays > 0 && await pruneFolder(scope, p.accountId, p.folder, messages.map(message => message.uid), keepDays)) count = await scope.data.dataset('folder_messages').count({ accountId: p.accountId, folder: p.folder })
         const arrived = established && p.folder.toUpperCase() === 'INBOX' ? messages.filter(message => message.uid > Number(previous?.cursor ?? 0) && !message.flags.includes('\\Seen') && message.receivedAt && Date.parse(message.receivedAt) >= Date.parse(String(previous?.lastSyncAt))).map(message => message.uid) : []
         const arrivedIds: string[] = []
         for (let offset = 0; offset < arrived.length; offset += 100) {
@@ -360,7 +362,7 @@ export function register(api: MailBackendApi): () => Promise<void> {
   let disposed = false
   let draining: Promise<void> | undefined
   const scope: MailBackendContext = {
-    ...emailStoreContext(api.data), network: api.network, credentials: api.credentials, accounts: api.accounts, services: api.services, t, notifications: api.notifications,
+    ...emailStoreContext(api.data), network: api.network, credentials: api.credentials, accounts: api.accounts, services: api.services, t, notifications: api.notifications, settings: api.settings,
     rpc: { handle: api.rpc.handle, emit: (name, payload) => { if (!disposed) api.rpc.emit(name, payload) } }
   }
   const off = Object.entries(methods).map(([name, method]) => {

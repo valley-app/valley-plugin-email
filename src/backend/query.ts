@@ -110,16 +110,18 @@ export async function readMessage(scope: EmailStoreContext, ref: EmailMessageRef
 
 export async function cacheMailboxes(scope: EmailStoreContext, accountId: string, mailboxes: { path: string; name: string; specialUse?: string; delimiter?: string; selectable: boolean }[]): Promise<void> {
   if (!mailboxes.length) return
-  await request(scope, { operation: 'transaction', operations: mailboxes.map((mailbox) => ({
-    operation: 'upsert', dataset: scope.datasets.mailboxes, values: {
-      accountId, path: mailbox.path, name: mailbox.name, selectable: mailbox.selectable,
-      specialUse: mailbox.specialUse ?? null, delimiter: mailbox.delimiter ?? null
-    }
-  })) })
+  const cached = new Map((await cachedMailboxes(scope, accountId)).map((row) => [String(row.path), row]))
+  const rows = mailboxes.map((mailbox) => ({
+    accountId, path: mailbox.path, name: mailbox.name, selectable: mailbox.selectable,
+    specialUse: mailbox.specialUse ?? null, delimiter: mailbox.delimiter ?? null
+  }))
+  const changed = rows.filter((row) => { const previous = cached.get(row.path); return !previous || Object.entries(row).some(([column, value]) => previous[column] !== value) })
+  if (changed.length) await request(scope, { operation: 'transaction', operations: changed.map((values) => ({ operation: 'upsert', dataset: scope.datasets.mailboxes, values })) })
   for (const mailbox of mailboxes) {
+    const stale: DatasetWhere = (cached.get(mailbox.path)?.specialUse ?? null) === (mailbox.specialUse ?? null) ? { or: [{ projectionVersion: { isNull: true } }, { projectionVersion: { neq: 1 } }] } : {}
     let cursor: string | undefined
     do {
-      const page = await scope.data.dataset(scope.datasets.folderMessages).query({ where: { accountId, folder: mailbox.path }, select: ['uid', 'messageId', 'flags'], limit: 500, cursor })
+      const page = await scope.data.dataset(scope.datasets.folderMessages).query({ where: { accountId, folder: mailbox.path, ...stale }, select: ['uid', 'messageId', 'flags'], limit: 500, cursor })
       if (page.rows.length) await scope.data.transaction(page.rows.map(row => ({ operation: 'update', dataset: scope.datasets.folderMessages, key: { accountId, folder: mailbox.path, uid: Number(row.uid) }, values: folderProjection(mailbox.path, mailbox.specialUse, Array.isArray(row.flags) ? row.flags as string[] : []) })))
       if (page.rows.length) await projectAssignments(scope, [...new Set(page.rows.map(row => String(row.messageId)))])
       cursor = page.cursor

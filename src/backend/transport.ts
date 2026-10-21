@@ -253,34 +253,60 @@ export async function listFolders(api: MailTransportApi, account: EmailAccount):
 const addressText = (addresses?: Address[]): string => (addresses ?? []).flatMap((address) => address.group ?? [address])
   .map((address) => address.name ? `${JSON.stringify(address.name)} <${address.address}>` : address.address).join(', ')
 
-export async function fetchFolder(api: MailTransportApi, account: EmailAccount, folder: string, limit: number): Promise<{ messages: CachedMessage[]; uidValidity?: number }> {
+function fetchedFields(replies: ImapReply[]): Map<string, ImapValue>[] {
+  return replies.flatMap((reply) => {
+    if (reply.tokens[2] !== 'FETCH' || !Array.isArray(reply.tokens[3])) return []
+    const values = reply.tokens[3]
+    const fields = new Map<string, ImapValue>()
+    for (let index = 0; index < values.length; index += 2) fields.set(String(values[index]).toUpperCase(), values[index + 1])
+    const uid = fetchedUid(fields)
+    return Number.isSafeInteger(uid) && uid >= 1 ? [fields] : []
+  })
+}
+
+const fetchedUid = (fields: Map<string, ImapValue>): number => Number(fields.get('UID'))
+const fetchedFlags = (fields: Map<string, ImapValue>): string[] => { const flags = fields.get('FLAGS'); return Array.isArray(flags) ? flags.filter((value): value is string => typeof value === 'string') : [] }
+const fetchedReceivedAt = (fields: Map<string, ImapValue>): string | undefined => typeof fields.get('INTERNALDATE') === 'string' ? String(fields.get('INTERNALDATE')) : undefined
+
+export async function fetchFolder(api: MailTransportApi, account: EmailAccount, folder: string, limit: number, cached?: (uids: number[], uidValidity: number | undefined) => Promise<Map<number, CachedMessage>>): Promise<{ messages: CachedMessage[]; uidValidity?: number }> {
   return withImap(api, account, async (connection) => {
     const selected = await connection.command(`SELECT ${quote(folder)}`)
     const total = Number(selected.find((reply) => reply.tokens[2] === 'EXISTS')?.tokens[1] ?? 0)
     const epoch = selected.map(reply => /\[UIDVALIDITY (\d+)\]/i.exec(reply.line)?.[1]).find(Boolean)
     const uidValidity = epoch ? Number(epoch) : undefined
     if (!total) return { messages: [], uidValidity }
-    const replies = await connection.command(`FETCH ${Math.max(1, total - limit + 1)}:* (UID FLAGS INTERNALDATE BODY.PEEK[])`)
-    const messages: CachedMessage[] = []
-    for (const reply of replies) {
-      if (reply.tokens[2] !== 'FETCH' || !Array.isArray(reply.tokens[3])) continue
-      const values = reply.tokens[3]
-      const fields = new Map<string, ImapValue>()
-      for (let index = 0; index < values.length; index += 2) fields.set(String(values[index]).toUpperCase(), values[index + 1])
+    const range = `${Math.max(1, total - limit + 1)}:*`
+    const fetchBodies = async (set: string) => fetchedFields(await connection.command(`${set} (UID FLAGS INTERNALDATE BODY.PEEK[])`))
+    let listed: Map<string, ImapValue>[] | undefined
+    let known = new Map<number, CachedMessage>()
+    let bodies: Map<string, ImapValue>[]
+    if (cached) {
+      listed = fetchedFields(await connection.command(`FETCH ${range} (UID FLAGS INTERNALDATE)`))
+      known = await cached(listed.map(fetchedUid), uidValidity)
+      const missing = listed.map(fetchedUid).filter(uid => !known.has(uid))
+      bodies = missing.length ? await fetchBodies(`UID FETCH ${missing.join(',')}`) : []
+    } else bodies = await fetchBodies(`FETCH ${range}`)
+    const fetched = new Map<number, CachedMessage>()
+    for (const fields of bodies) {
       const raw = fields.get('BODY[]') ?? fields.get('RFC822')
-      const uid = Number(fields.get('UID'))
-      if (!(raw instanceof Uint8Array) || !Number.isSafeInteger(uid) || uid < 1) continue
+      const uid = fetchedUid(fields)
+      if (!(raw instanceof Uint8Array)) continue
       const parsed = await parseMail(raw)
       await yieldTurn()
-      const flags = fields.get('FLAGS')
-      messages.push({ uid, uidValidity, complete: true, automationHeaders: automationHeaders(parsed.headers), originalDate: parsed.date ?? null, receivedAt: typeof fields.get('INTERNALDATE') === 'string' ? String(fields.get('INTERNALDATE')) : undefined,
+      fetched.set(uid, { uid, uidValidity, complete: true, automationHeaders: automationHeaders(parsed.headers), originalDate: parsed.date ?? null, receivedAt: fetchedReceivedAt(fields),
         attachmentDigests: await Promise.all(parsed.attachments.map(async attachment => digest(JSON.stringify([attachment.filename, attachment.mimeType, attachment.contentId ?? null, await digest(typeof attachment.content === 'string' ? attachment.content : new Uint8Array(attachment.content))])))),
         bcc: addressText(parsed.bcc) || undefined, messageId: parsed.messageId ?? '', from: addressText(parsed.from ? [parsed.from] : []),
         replyTo: addressText(parsed.replyTo) || undefined, to: addressText(parsed.to), cc: addressText(parsed.cc) || undefined,
         subject: parsed.subject ?? '(no subject)', date: parsed.date && Number.isFinite(Date.parse(parsed.date)) ? new Date(parsed.date).toISOString() : '',
         snippet: (parsed.text ?? '').replace(/\s+/g, ' ').trim().slice(0, 200), text: parsed.text, html: parsed.html,
-        flags: Array.isArray(flags) ? flags.filter((value): value is string => typeof value === 'string') : [], hasAttachments: parsed.attachments.length > 0 })
+        flags: fetchedFlags(fields), hasAttachments: parsed.attachments.length > 0 })
     }
+    const messages = listed ? listed.flatMap((fields): CachedMessage[] => {
+      const uid = fetchedUid(fields), stored = known.get(uid)
+      if (stored) return [{ ...stored, uid, uidValidity, flags: fetchedFlags(fields), receivedAt: fetchedReceivedAt(fields) }]
+      const message = fetched.get(uid)
+      return message ? [message] : []
+    }) : [...fetched.values()]
     return { messages, uidValidity }
   })
 }

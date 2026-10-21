@@ -186,4 +186,28 @@ describe('package-owned IMAP and SMTP', () => {
     expect(wire).toContain('Message-ID: <automated@example.test>')
     expect(wire).not.toContain('forged')
   })
+
+  it('fetches flags first and downloads bodies only for uncached UIDs', async () => {
+    const mime = 'From: moss@example.test\r\nTo: sender@example.test\r\nSubject: Moss\r\nMessage-ID: <moss@example.test>\r\n\r\nMoss body'
+    const flags = '* 2 FETCH (UID 71 FLAGS (\\Seen) INTERNALDATE "09-Sep-2026 10:00:00 +0000")\r\n* 3 FETCH (UID 72 FLAGS () INTERNALDATE "10-Sep-2026 10:00:00 +0000")\r\nV4 OK fetched\r\n'
+    const fixture = transport(`${login()}* 3 EXISTS\r\n* OK [UIDVALIDITY 9] valid\r\nV3 OK selected\r\n${flags}* 3 FETCH (UID 72 FLAGS () BODY[] {${new TextEncoder().encode(mime).length}}\r\n${mime})\r\nV5 OK fetched\r\n`)
+    const stored = { uid: 71, uidValidity: 9, logicalId: 'v1:stored', contentRevision: 'stored', complete: true, messageId: '<fern@example.test>', from: 'fern@example.test', to: 'sender@example.test', subject: 'Fern', date: '', snippet: '', flags: [], hasAttachments: false }
+    const cached = vi.fn(async (uids: number[], uidValidity: number | undefined) => new Map(uids.includes(71) && uidValidity === 9 ? [[71, stored]] : []))
+    const { messages, uidValidity } = await fetchFolder(fixture.api, account, 'INBOX', 2, cached)
+    expect(uidValidity).toBe(9)
+    expect(cached).toHaveBeenCalledWith([71, 72], 9)
+    const commands = fixture.writes.join('')
+    expect(commands).toContain('V4 FETCH 2:* (UID FLAGS INTERNALDATE)\r\n')
+    expect(commands).toContain('V5 UID FETCH 72 (UID FLAGS INTERNALDATE BODY.PEEK[])\r\n')
+    expect(commands.match(/BODY\.PEEK/g)).toHaveLength(1)
+    expect(messages).toEqual([{ ...stored, flags: ['\\Seen'], receivedAt: '09-Sep-2026 10:00:00 +0000' }, expect.objectContaining({ uid: 72, uidValidity: 9, messageId: '<moss@example.test>', text: expect.stringContaining('Moss body'), receivedAt: undefined })])
+  })
+
+  it('downloads no bodies when every listed UID is cached', async () => {
+    const fixture = transport(`${login()}* 1 EXISTS\r\n* OK [UIDVALIDITY 9] valid\r\nV3 OK selected\r\n* 1 FETCH (UID 71 FLAGS (\\Flagged) INTERNALDATE "09-Sep-2026 10:00:00 +0000")\r\nV4 OK fetched\r\n`)
+    const stored = { uid: 71, uidValidity: 9, logicalId: 'v1:stored', contentRevision: 'stored', messageId: '<fern@example.test>', from: 'fern@example.test', to: 'sender@example.test', subject: 'Fern', date: '', snippet: '', flags: [], hasAttachments: false }
+    const { messages } = await fetchFolder(fixture.api, account, 'INBOX', 50, async () => new Map([[71, stored]]))
+    expect(fixture.writes.join('')).not.toContain('BODY')
+    expect(messages).toEqual([{ ...stored, flags: ['\\Flagged'], receivedAt: '09-Sep-2026 10:00:00 +0000' }])
+  })
 })

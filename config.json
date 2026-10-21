@@ -93,7 +93,7 @@
     {
       "id": "messages",
       "store": "cache",
-      "version": 4,
+      "version": 5,
       "title": "Messages",
       "primaryKey": [
         "id"
@@ -256,10 +256,20 @@
             "sortDate",
             "id"
           ]
+        },
+        {
+          "id": "projection",
+          "columns": [
+            "accountId",
+            "projectionVersion"
+          ]
         }
       ],
       "visibility": "shared",
       "sensitivity": "sensitive",
+      "retention": {
+        "column": "date"
+      },
       "titleKey": "auto.f1702b468627"
     },
     {
@@ -298,7 +308,7 @@
     {
       "id": "folder_messages",
       "store": "cache",
-      "version": 3,
+      "version": 4,
       "title": "Folder membership",
       "primaryKey": [
         "accountId",
@@ -402,6 +412,14 @@
             "unread",
             "flagged"
           ]
+        },
+        {
+          "id": "projection",
+          "columns": [
+            "accountId",
+            "folder",
+            "projectionVersion"
+          ]
         }
       ],
       "titleKey": "auto.6740906a49df"
@@ -436,40 +454,6 @@
         }
       },
       "titleKey": "auto.78cbf8eb1d8f"
-    },
-    {
-      "id": "attachments",
-      "store": "cache",
-      "version": 1,
-      "title": "Attachment metadata",
-      "primaryKey": [
-        "messageId",
-        "position"
-      ],
-      "columns": {
-        "messageId": {
-          "type": "text"
-        },
-        "position": {
-          "type": "integer"
-        },
-        "filename": {
-          "type": "text"
-        },
-        "contentType": {
-          "type": "text",
-          "nullable": true
-        },
-        "size": {
-          "type": "integer",
-          "nullable": true
-        },
-        "filePath": {
-          "type": "text",
-          "nullable": true
-        }
-      },
-      "titleKey": "auto.3553cb747ca8"
     },
     {
       "id": "sync_state",
@@ -613,13 +597,6 @@
         }
       ],
       "titleKey": "email.dataset.classification_jobs"
-    }
-  ],
-  "storageInventory": [
-    {
-      "id": "attachment-files",
-      "kind": "attachments",
-      "store": "cache"
     }
   ],
   "provides": [
@@ -1080,6 +1057,20 @@
           "type": "integer",
           "minimum": 1,
           "maximum": 500
+        }
+      },
+      {
+        "key": "cacheDays",
+        "label": "Keep cached mail for",
+        "labelKey": "plugin.email.field.cacheDays",
+        "type": "number",
+        "default": 180,
+        "description": "Days of mail kept offline. Older cached messages are removed after each sync; the newest messages of a sync are always kept and mail on the server is not affected.",
+        "descriptionKey": "plugin.email.field.cacheDaysDesc",
+        "schema": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 3650
         }
       },
       {
@@ -7638,6 +7629,45 @@
           "definition": {
             "type": "json",
             "nullable": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "messages-projection-index-v5",
+      "store": "cache",
+      "fromVersion": 4,
+      "toVersion": 5,
+      "steps": [
+        {
+          "operation": "create-index",
+          "dataset": "messages",
+          "index": {
+            "id": "projection",
+            "columns": [
+              "accountId",
+              "projectionVersion"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "folder_messages-projection-index-v4",
+      "store": "cache",
+      "fromVersion": 3,
+      "toVersion": 4,
+      "steps": [
+        {
+          "operation": "create-index",
+          "dataset": "folder_messages",
+          "index": {
+            "id": "projection",
+            "columns": [
+              "accountId",
+              "folder",
+              "projectionVersion"
+            ]
           }
         }
       ]

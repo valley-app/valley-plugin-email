@@ -12,7 +12,7 @@ const id = (n: number) => `pureemail-00000000-0000-4000-8000-00000000000${n}`
 const account = (n: number): EmailAccount => ({ id: id(n), provider: 'pureemail', address: `user${n}@example.test`, createdAt: n,
   imap: { host: 'imap.example.test', port: 993, secure: true }, smtp: { host: 'smtp.example.test', port: 465, secure: true } })
 const message = (uid: number, subject: string, extra: Partial<CachedMessage> = {}): CachedMessage => ({ uid, uidValidity: 7, messageId: `<${subject}@example.test>`, from: 'sender@example.test', to: 'a@example.test, b@example.test', cc: 'c@example.test', subject, date: `2031-01-0${uid % 9 + 1}T00:00:00.000Z`, snippet: subject, text: subject, flags: ['\\Seen'], hasAttachments: false, ...extra })
-const CACHE = ['messages', 'mailboxes', 'folder_messages', 'recipients', 'attachments', 'sync_state']
+const CACHE = ['messages', 'mailboxes', 'folder_messages', 'recipients', 'sync_state']
 
 async function fixture(stored: 'absent' | 'stored' = 'absent') {
   const mock = createMockValleyApi({ manifest: { id: 'email', datasets: config.datasets as unknown as ValleyPluginManifest['datasets'] } })
