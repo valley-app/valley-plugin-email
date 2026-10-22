@@ -68,8 +68,10 @@ describe('Email mailbox', () => {
     expect(card).not.toHaveProperty('render')
     expect(await card.open({ id: message.id, accountId: 'one' }, { newTab: true })).toBe(true)
     expect(mock.mail.readMessage).toHaveBeenLastCalledWith({ accountId: 'one', folder: 'INBOX', uid: 7 })
-    expect(getStore().getSnapshot()).toMatchObject({ selectedAccountIds: ['one'], selectedFolder: 'INBOX', selectedUid: 7, selectedMessage: { id: message.id } })
-    expect(open).toHaveBeenCalledWith({ newTab: true })
+    expect(open).toHaveBeenCalledWith({ instanceId: expect.stringMatching(/^mail-/), newTab: true, title: message.subject })
+    expect(getStore().getSnapshot().selectedAccountIds).toEqual(['two'])
+    mock.emitState({ activePluginTab: { pluginId: 'email', instanceId: open.mock.calls[0][0]!.instanceId } })
+    await waitFor(() => expect(getStore().getSnapshot()).toMatchObject({ selectedAccountIds: ['one'], selectedFolder: 'INBOX', selectedUid: 7, selectedMessage: { id: message.id } }))
     await dispose?.()
     dispose = undefined
     expect(mock.api.interop.extensions.providers(SEARCH_RESULT_ACTION_V1)).toEqual([])

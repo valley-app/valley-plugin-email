@@ -1,6 +1,6 @@
 import { commandRegistrar, emailResults } from './commandResults'
 import { mailApi } from './mailApi'
-import { METADATA_PANEL_SEGMENT_V1, provideBookmarkSurface, type PluginInspectionSubject, type PluginProperty, type ValleyPluginApi } from '@valley/plugin-sdk'
+import { METADATA_PANEL_SEGMENT_V1, provideBookmarkSurface, type PluginInspectionSubject, type PluginProperty, type PluginSurfaceSnapshot, type ValleyPluginApi } from '@valley/plugin-sdk'
 import type { EmailMessageDetail, EmailMessageRef } from './mailTypes'
 import type { PluginLinkState } from '@valley/plugin-sdk/paths'
 import { api, React } from './runtime'
@@ -8,6 +8,7 @@ import { formatEmailTimestamp, getStore, messageKey, type EmailSelection, type E
 import { useEmailDateFormat } from './hooks'
 import { messageMenu } from './MessageActions'
 import { uiText } from './localization'
+import { emailTabs, type ParkedEmailTab } from './tabs'
 import { folderLabel } from './Panel'
 import type { InteropValueSchema } from '@valley/plugin-sdk'
 
@@ -100,6 +101,11 @@ function selection(raw: unknown): EmailSelection {
 }
 
 const targetOf = (subject?: PluginInspectionSubject): EmailSelection => selection(subject?.item?.state ?? subject?.view ?? {})
+const parkedSnapshot = ({ selection: parked, title }: ParkedEmailTab): PluginSurfaceSnapshot => {
+  const view: PluginLinkState = { accountIds: [...parked.accountIds], view: parked.view, folder: parked.folder, query: parked.query ?? '' }
+  return { title: title || uiText('manifest.name'), view,
+    ...(parked.message ? { item: { id: messageKey(parked.message), title: title || uiText('email.noSubject'), state: { ...view, message: { accountId: parked.message.accountId, folder: parked.message.folder, uid: parked.message.uid } } } } : {}) }
+}
 const viewState = (): PluginLinkState => {
   const snap = getStore().getSnapshot()
   return { accountIds: [...snap.selectedAccountIds], view: snap.view, folder: snap.selectedFolder, query: snap.query }
@@ -246,8 +252,14 @@ export function registerEmailSurfaces(pluginApi: ValleyPluginApi): () => void {
   const store = getStore()
   const surfaces = ['main_workspace', 'left_sidebar', 'right_sidebar'] as const
   const offs = surfaces.map((surface) => provideBookmarkSurface(pluginApi, {
-    id: `email.${surface}`, surface, subscribe: store.subscribe,
-    getSnapshot: () => {
+    id: `email.${surface}`, surface,
+    subscribe: (listener) => {
+      const offStore = store.subscribe(listener), offTabs = emailTabs()?.subscribe(listener)
+      return () => { offStore(); offTabs?.() }
+    },
+    getSnapshot: (instanceId) => {
+      const away = surface === 'main_workspace' ? emailTabs()?.parked(instanceId) : null
+      if (away) return parkedSnapshot(away)
       const snap = store.getSnapshot()
       const message = snap.selectedMessage
       const view = viewState()
@@ -256,8 +268,10 @@ export function registerEmailSurfaces(pluginApi: ValleyPluginApi): () => void {
         navigation: { canGoBack: snap.canGoBack, canGoForward: snap.canGoForward, goBack: store.goBack, goForward: store.goForward }
       }
     },
-    restore: async (state, _instanceId, options) => {
-      if (options?.background && store.getSnapshot().compose?.dirty) return
+    restore: async (state, instanceId, options) => {
+      const tabs = emailTabs()
+      if (surface === 'main_workspace' && tabs) return tabs.restore(selection(state), instanceId, Boolean(options?.background))
+      if (options?.background && (store.getSnapshot().compose?.dirty || tabs?.claimed())) return
       await store.restoreSelection(selection(state))
     }
   }, { stateSchema: bookmarkStateSchema, itemStateSchema: { ...bookmarkStateSchema, required: [...bookmarkStateSchema.required, "message"] }, description: snapshot => String(snapshot.view.query || snapshot.view.folder || uiText('bookmark.view')), validate: state => { selection(state); return true } }))
@@ -280,7 +294,7 @@ export function registerEmailSurfaces(pluginApi: ValleyPluginApi): () => void {
     run: async (target) => {
       await store.whenReady.catch(() => undefined)
       const previous = store.captureNavigation()
-      await store.restoreSelection(target); pluginApi.workspace.openMainTab()
+      await store.restoreSelection(target); emailTabs()?.reveal()
       return { value: { ...target }, revert: { label: 'Email: Open a mailbox or message', run: () => store.restoreNavigation(previous) } }
     }
   }))

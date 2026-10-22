@@ -11,6 +11,9 @@ import { Settings } from './Settings'
 import { initLocalization } from './localization'
 import { emailAgentTools, registerEmailAgentCommands } from './agentTools'
 import { registerEmailSurfaces } from './surfaces'
+import { createEmailTabs, revealEmailTab } from './tabs'
+import { mailApi } from './mailApi'
+import { uiText } from './localization'
 
 export function register(api: ValleyPluginApi): () => Promise<void> {
   initLocalization(api)
@@ -18,6 +21,7 @@ export function register(api: ValleyPluginApi): () => Promise<void> {
   const disposeStyles = injectStyles()
   // Instantiate the window-anchored store eagerly so account state loads.
   const store = getStore(api)
+  const tabs = createEmailTabs(api, store)
   const offLinkHandler = api.links.register({
     id: 'compose',
     label: api.ui.t('manifest.name'), version: '1.0.0', categories: ['email'], schemes: ['mailto'],
@@ -27,7 +31,7 @@ export function register(api: ValleyPluginApi): () => Promise<void> {
       const addresses = (raw: string) => raw.split(',').map(address => address.trim()).filter(address => /^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/.test(address)).map(address => ({ address, name: '' }))
       const previous = store.getSnapshot().compose
       await store.startCompose('new', undefined, { to: addresses(decodeURIComponent(url.pathname)), cc: addresses(url.searchParams.get('cc') ?? ''), bcc: addresses(url.searchParams.get('bcc') ?? ''), subject: (url.searchParams.get('subject') ?? '').replace(/[\r\n]/g, ' '), text: url.searchParams.get('body') ?? '' })
-      api.workspace.openMainTab()
+      revealEmailTab()
       return { status: store.getSnapshot().compose !== previous ? 'opened' : store.getSnapshot().selectedAccountId ? 'cancelled' : 'unavailable' }
     }
   })
@@ -39,7 +43,7 @@ export function register(api: ValleyPluginApi): () => Promise<void> {
         const message = JSON.parse(event.targetItemId!) as { accountId: string; folder: string; uid: number }
         await store.restoreSelection({ accountIds: [message.accountId], view: 'folder', folder: message.folder, message })
       }
-      api.workspace.openMainTab()
+      revealEmailTab()
     })().catch(() => {})
   })
   const offFlush = api.runtime.onBeforeUnload(() => store.flushDraft())
@@ -54,11 +58,17 @@ export function register(api: ValleyPluginApi): () => Promise<void> {
       const inbox = await memberships.query({ where: { ...where, folder: 'INBOX' }, limit: 1 })
       const membership = inbox.rows[0] ?? (await memberships.query({ where, orderBy: [{ field: 'folder', direction: 'asc' }, { field: 'uid', direction: 'asc' }], limit: 1 })).rows[0]
       if (!membership || typeof membership.folder !== 'string' || typeof membership.uid !== 'number' || !Number.isSafeInteger(membership.uid) || membership.uid < 1) return false
-      const restored = await store.restoreSelection({
-        accountIds: [record.accountId], view: 'folder', folder: membership.folder,
-        message: { accountId: record.accountId, folder: membership.folder, uid: membership.uid }
-      })
-      if (restored) api.workspace.openMainTab({ newTab: context.newTab })
+      const target = { accountIds: [record.accountId], view: 'folder' as const, folder: membership.folder,
+        message: { accountId: record.accountId, folder: membership.folder, uid: membership.uid } }
+      if (context.newTab) {
+        const result = await mailApi(api).readMessage(target.message)
+        if (!result.ok) throw new Error(result.error || uiText('email.error.readMessage'))
+        if (!result.data?.message) throw new Error(uiText('email.error.messageMissing'))
+        tabs.openNew(target, result.data.message.subject || undefined)
+        return true
+      }
+      const restored = await store.restoreSelection(target)
+      if (restored) revealEmailTab()
       return restored
     }
   })
@@ -85,7 +95,7 @@ export function register(api: ValleyPluginApi): () => Promise<void> {
       const after = composer.getSnapshot()
       if (!after.composing || !after.compose) notApplied('COMPOSE_UNAVAILABLE', 'The email draft could not be opened.')
       const created = after.compose!.id !== before.compose?.id ? after.compose!.id : null
-      api.workspace.openMainTab()
+      revealEmailTab()
       return { value: null, revert: { label: 'Email: Compose', run: () => composer.revertCompose(previous, created) } }
     }
   })
@@ -106,7 +116,7 @@ export function register(api: ValleyPluginApi): () => Promise<void> {
     label: 'Email: Open mailbox', labelKey: 'auto.ddf53deccb65',
     sideEffect: 'read',
     run: () => {
-      api.workspace.openMainTab()
+      revealEmailTab()
       return null
     }
   })
@@ -136,6 +146,7 @@ export function register(api: ValleyPluginApi): () => Promise<void> {
     offCommands()
     offSurfaces()
     offSearch()
+    tabs.dispose()
     const drained = disposeStore(api)
     disposeStyles()
     return drained

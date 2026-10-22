@@ -7,6 +7,7 @@ import { getStore, messageKey } from './store'
 import { readEmailDisplaySettings } from './hooks'
 import { Archive, Eye, EyeOff, Flag, Forward, Junk, Reply, ReplyAll, Trash } from './icons'
 import { uiText } from './localization'
+import { revealEmailTab } from './tabs'
 
 export async function confirmTrash(message: CachedMessage): Promise<boolean> {
   return await api.ui.confirm({ title: uiText('auto.253157581e26'), message: message.subject, actions: [
@@ -26,7 +27,7 @@ export function messageMenu(message: EmailMessageSummary | EmailMessageDetail): 
     const result = await mailApi(api).readMessage(message)
     if (!result.ok || !result.data?.message) return
     await store.startCompose(mode, result.data.message)
-    api.workspace.openMainTab()
+    revealEmailTab()
   }
   const { htmlContent } = readEmailDisplaySettings(message.accountId)
   const plainText = snap.bodyOverride?.key === messageKey(message) && snap.bodyOverride.htmlContent === htmlContent ? snap.bodyOverride.plainText : !htmlContent
