@@ -68,7 +68,9 @@ export async function queryMessages(scope: EmailStoreContext, input: EmailMessag
   if (filters.contact && filters.contact !== 'all') conditions.push({ hasContact: filters.contact === 'known' })
   if (filters.vip && filters.vip !== 'all') conditions.push({ isVip: filters.vip === 'vip' })
   if (filters.spam === 'spam' || filters.spam === 'not-spam') conditions.push({ isSpam: filters.spam === 'spam' })
-  if (filters.categoryId) conditions.push({ categoryId: filters.categoryId === 'uncategorized' ? { isNull: true } : filters.categoryId })
+  if (filters.categoryIds?.length) conditions.push({ categoryId: { in: filters.categoryIds } })
+  else if (filters.categoryId) conditions.push({ categoryId: filters.categoryId === 'uncategorized' ? { isNull: true } : filters.categoryId })
+  if (filters.categoryAccountId) conditions.push({ accountId: filters.categoryAccountId })
   if (input.query?.trim()) conditions.push({ or: ['from', 'to', 'cc', 'subject', 'snippet', 'text', 'html'].map(field => ({ [field]: { contains: input.query!.trim() } })) })
   const stamp = await scope.data.snapshot([
     { operation: 'query', dataset: scope.datasets.messages, query: { select: ['id'], limit: 1 } },

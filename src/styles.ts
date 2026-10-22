@@ -269,10 +269,32 @@ button.email-person { border:0; padding:0; background:none; text-align:left; cur
 .email-message-organization .email-vip-star{font-size:1.25rem;line-height:1;color:var(--text-secondary)}
 .email-message-organization .email-vip-star.active{color:var(--accent-color)}
 .email-organization-settings{padding:20px 16px;display:grid;gap:20px;border-top:1px solid var(--border-light)}
-.email-settings-hint,.email-classifier-default{margin:0 0 12px;font-size:0.75rem;color:var(--text-secondary);line-height:1.5}
-.email-category-setting{display:grid;gap:6px}.email-category-name{display:flex;align-items:center;gap:8px}
+.email-settings-hint{margin:0 0 12px;font-size:0.75rem;color:var(--text-secondary);line-height:1.5}
 .email-organization-actions{display:flex;justify-content:flex-end;flex-wrap:wrap;gap:8px;margin-top:12px}
-.email-group-color{width:9px;height:9px;border-radius:50%;flex:none}
+.email-smart-groups{display:grid;gap:8px}
+.email-smart-tree{display:grid;gap:6px;margin-top:4px}
+.email-smart-list{list-style:none;margin:0;padding:0;display:grid;gap:2px}
+.email-smart-row{display:flex;align-items:center;gap:8px;min-height:32px;padding-inline-end:6px;border-radius:5px}
+.email-smart-row:hover{background:var(--hover-bg)}
+.email-smart-row>svg{width:15px;height:15px;flex:none;color:var(--text-secondary)}
+.email-smart-name{flex:1 1 auto;min-width:0;padding:4px 2px;border:0;background:none;color:var(--text-color);font:inherit;font-size:.8125rem;font-weight:500;text-align:left;cursor:text;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.email-smart-rename{flex:1 1 auto;min-width:0;padding:3px 6px;border:1px solid var(--border-light);border-radius:4px;background:var(--pane-bg);color:var(--text-color);font:inherit;font-size:.8125rem;outline:none}
+.email-smart-add{flex:none;width:24px;height:24px;border:0;border-radius:4px;background:none;color:var(--text-secondary);font:inherit;font-size:1rem;line-height:1;cursor:pointer;opacity:0;transition:opacity .12s}
+.email-smart-row:hover .email-smart-add,.email-smart-add:focus-visible{opacity:1}
+.email-smart-add:hover{background:var(--hover-bg);color:var(--text-color)}
+.email-smart-details{display:grid;gap:4px;padding-block:2px 6px;padding-inline-end:6px}
+.email-smart-when{display:grid;gap:4px;font-size:.75rem;color:var(--text-secondary)}
+.email-smart-more{justify-self:start;display:inline-flex;gap:4px;align-items:center;padding:2px 4px;border:0;border-radius:4px;background:none;color:var(--text-secondary);font:inherit;font-size:.75rem;cursor:pointer}
+.email-smart-more:hover{background:var(--hover-bg);color:var(--text-color)}
+.email-smart-more-body{display:grid;gap:8px;padding:6px 0 4px 10px;border-inline-start:1px solid var(--border-light)}
+.email-smart-sure{display:flex;flex-wrap:wrap;align-items:center;gap:6px;font-size:.75rem;color:var(--text-secondary)}
+.email-smart-sure>span{white-space:nowrap}
+.email-smart-sure>[data-plugin-widget]{width:52px !important;flex:none}
+.email-smart-always{display:grid;gap:4px;font-size:.75rem;color:var(--text-secondary)}
+.email-smart-actions{display:flex;flex-wrap:wrap;gap:6px}
+.email-popover-sublabel{padding:4px 8px 2px;font-size:.6875rem;color:var(--text-secondary);overflow-wrap:anywhere}
+.email-group-option small{margin-inline-start:auto;color:var(--text-secondary)}
+.email-category-basis{color:var(--text-secondary)}
 .email-classification-status{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:8px 12px;font-size:0.6875rem;color:var(--text-secondary);border-bottom:1px solid var(--border-light)}
 .email-classification-selection>div{display:grid;max-height:260px;overflow:auto;padding:8px 0}
 .email-classification-selection label{display:flex;align-items:center;gap:8px;font-size:0.75rem;padding:4px 0}

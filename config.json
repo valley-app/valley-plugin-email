@@ -489,7 +489,7 @@
     {
       "id": "assignments",
       "store": "durable",
-      "version": 1,
+      "version": 2,
       "title": "Email category assignments",
       "visibility": "private",
       "sensitivity": "sensitive",
@@ -519,6 +519,14 @@
         "revision": {
           "type": "integer",
           "default": 0
+        },
+        "confidence": {
+          "type": "real",
+          "nullable": true
+        },
+        "source": {
+          "type": "text",
+          "nullable": true
         }
       },
       "indexes": [],
@@ -7668,6 +7676,32 @@
               "folder",
               "projectionVersion"
             ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "assignments-smart-groups-v2",
+      "store": "durable",
+      "fromVersion": 1,
+      "toVersion": 2,
+      "steps": [
+        {
+          "operation": "add-column",
+          "dataset": "assignments",
+          "column": "confidence",
+          "definition": {
+            "type": "real",
+            "nullable": true
+          }
+        },
+        {
+          "operation": "add-column",
+          "dataset": "assignments",
+          "column": "source",
+          "definition": {
+            "type": "text",
+            "nullable": true
           }
         }
       ]

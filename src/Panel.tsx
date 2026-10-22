@@ -1,10 +1,11 @@
-import { EmailFilterControls, ClassificationStatus } from './Organization'
+import { EmailFilterControls, ClassificationStatus, useSmartGroups } from './Organization'
+import { descendantIds, findGroupPath, flattenGroups } from './smartGroups'
 import { React, api } from './runtime'
 import type { EmailAccount, EmailMailbox } from './mailTypes'
 import type { EmailMailboxView } from './mailTypes'
 import { useEmail } from './hooks'
 import { ErrorNotice } from './Notice'
-import { Archive, ChevronDown, EyeOff, Flag, Google, Inbox, Mail, Microsoft, Plus, Reload, Search, Send, Trash, Paperclip, Filter } from './icons'
+import { Archive, ChevronDown, EyeOff, Flag, Google, Inbox, Mail, Microsoft, Plus, Reload, Search, Send, Trash, Paperclip, Filter, Tag } from './icons'
 import { SwipeRow } from './SwipeRow'
 import { ContactAvatar, contactName } from './People'
 import { uiText } from './localization'
@@ -62,23 +63,60 @@ export const AccountPopover: React.FC = () => {
 const smartViews: { view: EmailMailboxView; Icon: React.ComponentType }[] = [
   { view: 'recent', Icon: Mail }, { view: 'unread', Icon: EyeOff }, { view: 'flagged', Icon: Flag }
 ]
+const GroupOptions: React.FC<{ close(): void }> = ({ close }) => {
+  const { store, snap } = useEmail()
+  const config = useSmartGroups()
+  const selected = snap.selectedAccountIds.length ? snap.selectedAccountIds : snap.accounts.map((account) => account.id)
+  const accounts = config.enabled ? snap.accounts.filter((account) => selected.includes(account.id) && config.accounts[account.id]?.groups.length) : []
+  const accountKey = accounts.map((account) => account.id).join('\u0000')
+  const [counts, setCounts] = React.useState<Record<string, Record<string, number>>>({})
+  React.useEffect(() => {
+    if (!accountKey) return
+    let active = true
+    const messages = api.data.dataset('messages')
+    const load = (): void => { void Promise.all(accountKey.split('\u0000').map(async (accountId) => [accountId, Object.fromEntries((await messages.aggregate({
+      where: { accountId, categoryId: { isNull: false }, exists: { dataset: 'folder_messages', on: { id: 'messageId', accountId: 'accountId' }, where: { excluded: false } } }, groupBy: ['categoryId'], metrics: { count: { operation: 'count' } }
+    })).map((row) => [String(row.categoryId), Number(row.count)]))] as const)).then((entries) => { if (active) setCounts(Object.fromEntries(entries)) }, () => {}) }
+    load()
+    const off = messages.subscribe(load)
+    return () => { active = false; off() }
+  }, [accountKey])
+  if (!accounts.length) return null
+  return <>
+    <div className="email-popover-separator" /><div className="email-popover-label">{uiText('email.smartGroups.groups')}</div>
+    {accounts.map((account) => <div key={account.id} role="group" aria-label={account.displayName || account.address}>
+      {accounts.length > 1 && <div className="email-popover-sublabel">{account.displayName || account.address}</div>}
+      {flattenGroups(config.accounts[account.id].groups).map((entry) => {
+        const active = snap.view === 'recent' && snap.filters.categoryAccountId === account.id && snap.filters.categoryId === entry.group.id
+        const count = descendantIds(entry.group).reduce((sum, id) => sum + (counts[account.id]?.[id] ?? 0), 0)
+        return <button key={entry.group.id} role="menuitemradio" aria-checked={active} className={`email-account-option email-group-option${active ? ' selected' : ''}`} style={{ paddingInlineStart: 8 + entry.depth * 16 }}
+          onClick={() => { void store.selectGroup(account.id, entry.group.id); close() }}>
+          <span className="email-account-check">{active ? '✓' : ''}</span><Tag /><span className="email-row-label">{entry.group.name || '…'}</span><small>{count}</small>
+        </button>
+      })}
+    </div>)}
+  </>
+}
+
 export const FolderPopover: React.FC<{ close(): void }> = ({ close }) => {
   const { store, snap } = useEmail()
+  const grouped = Boolean(snap.filters.categoryAccountId && snap.filters.categoryId)
   return <div className="email-account-popover">
     <div className="email-popover-label">{uiText('email.mailboxes')}</div>
-    {smartViews.map(({ view, Icon }) => <button key={view} role="menuitemradio" aria-checked={snap.view === view}
-      className={`email-account-option${snap.view === view ? ' selected' : ''}`} onClick={() => { void store.selectView(view); close() }}>
-      <span className="email-account-check">{snap.view === view ? '✓' : ''}</span><Icon /><span>{uiText(`email.view.${view}`)}</span>
+    {smartViews.map(({ view, Icon }) => <button key={view} role="menuitemradio" aria-checked={snap.view === view && !grouped}
+      className={`email-account-option${snap.view === view && !grouped ? ' selected' : ''}`} onClick={() => { void store.selectGroup(null).then(() => store.selectView(view)); close() }}>
+      <span className="email-account-check">{snap.view === view && !grouped ? '✓' : ''}</span><Icon /><span>{uiText(`email.view.${view}`)}</span>
     </button>)}
     <div className="email-popover-separator" /><div className="email-popover-label">{uiText('auto.19adc47be34b')}</div>
     {snap.mailboxes.map((mailbox) => {
       const active = snap.view === 'folder' && snap.selectedFolder === mailbox.path
       return <button key={mailbox.path} role="menuitemradio" aria-checked={active} className={`email-account-option${active ? ' selected' : ''}`}
-        onClick={() => { void store.selectFolder(mailbox.path); close() }}>
+        onClick={() => { void store.selectGroup(null).then(() => store.selectFolder(mailbox.path)); close() }}>
         <span className="email-account-check">{active ? '✓' : ''}</span><FolderIcon mailbox={mailbox} />
         <span className="email-row-label">{folderLabel(mailbox)}</span>{mailbox.cachedUnread > 0 && <small>{mailbox.cachedUnread}</small>}
       </button>
     })}
+    <GroupOptions close={close} />
   </div>
 }
 
@@ -94,7 +132,9 @@ export const MailboxControls: React.FC<{ compact?: boolean }> = ({ compact = fal
   const close = (): void => { setExpanded(null); trigger.current?.focus() }
   const account = snap.accounts.find((candidate) => candidate.id === snap.selectedAccountId)
   const mailbox = snap.mailboxes.find((candidate) => candidate.path === snap.selectedFolder)
-  const label = snap.view === 'folder' ? mailbox ? folderLabel(mailbox) : snap.selectedFolder : uiText(`email.view.${snap.view}`)
+  const config = useSmartGroups()
+  const group = snap.view === 'recent' && snap.filters.categoryAccountId && snap.filters.categoryId ? findGroupPath(config.accounts[snap.filters.categoryAccountId]?.groups ?? [], snap.filters.categoryId) : undefined
+  const label = group ? group.map((item) => item.name || '…').join(' / ') : snap.view === 'folder' ? mailbox ? folderLabel(mailbox) : snap.selectedFolder : uiText(`email.view.${snap.view}`)
   const accountLabel = snap.selectedAccountIds.length === 0 || snap.selectedAccountIds.length === snap.accounts.length ? uiText('email.allAccounts')
     : snap.selectedAccountIds.length === 1 ? account?.displayName || account?.address
       : uiText('email.selectedAccounts', { count: snap.selectedAccountIds.length })
@@ -105,7 +145,7 @@ export const MailboxControls: React.FC<{ compact?: boolean }> = ({ compact = fal
       }}>{account ? <AccountIcon account={account} /> : <Mail />}<span>{accountLabel}</span><ChevronDown /></button>
     <button className="email-selector" disabled={!account} title={label} aria-label={uiText('email.mailboxes')} aria-expanded={expanded === 'folders'} aria-controls={panelId} onClick={(event) => {
       toggle('folders', event.currentTarget)
-    }}>{snap.view === 'folder' && mailbox ? <FolderIcon mailbox={mailbox} /> : snap.view === 'unread' ? <EyeOff /> : snap.view === 'flagged' ? <Flag /> : <Mail />}<span>{label}</span><ChevronDown /></button>
+    }}>{group ? <Tag /> : snap.view === 'folder' && mailbox ? <FolderIcon mailbox={mailbox} /> : snap.view === 'unread' ? <EyeOff /> : snap.view === 'flagged' ? <Flag /> : <Mail />}<span>{label}</span><ChevronDown /></button>
     <button className="email-icon-btn" title={uiText('email.filters')} aria-label={uiText('email.filters')} aria-expanded={expanded === 'filters'} aria-controls={panelId} onClick={event => toggle('filters', event.currentTarget)}><Filter /></button>
     <button className="email-icon-btn email-reload" title={uiText(snap.syncing ? 'email.reloading' : 'email.reload')} aria-label={uiText('email.reload')} aria-busy={snap.syncing} disabled={!account || snap.syncing} onClick={() => { void store.sync() }}><Reload /></button>
     <button className="email-icon-btn email-compose-action" title={uiText('auto.47da6f0838f0')} aria-label={uiText('auto.47da6f0838f0')} disabled={!account} onClick={() => {

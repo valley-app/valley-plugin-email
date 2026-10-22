@@ -8,13 +8,15 @@ This repository owns the plugin’s interface, behavior, dependencies, schemas, 
 
 Valley ships this core plugin as a verified release artifact in its application resources. Core and external installations run with the same sandbox, permissions, and SDK/IPC contract. The core package and its locale files are never installed into `.valley`; ordinary vault documents and saved plugin data retain their existing locations.
 
-## Filters and automatic groups
+## Filters and smart groups
 
 Account and mailbox controls expand inline. Email resolves names and photos through Contacts, stores VIP addresses separately from message flags, and filters contact status, VIP, provider spam status, and virtual categories before SQLite pagination. The reader keeps one scroll area; full addresses and composer Cc/Bcc fields expand on demand.
 
-Choose Jev or Laya under Valley’s AI Providers and set the shared Classification default. Email uses shared groups, with its own enabled categories and descriptions under Email Settings → Groups. Laya runs separately on loopback; model installation and server lifecycle stay outside Valley. There is no automatic cloud fallback.
+Smart groups are set up on Email’s main Settings page and stored in the plugin data file `smart-groups.json`. Each account has its own tree of groups and subgroups; a group has a name, a decision sentence (“Put mail here when…”), and under More a confidence threshold (default 60 %) and “Always put mail from” rules (sender address, sender domain, or a Contacts entry). Rules decide first and need no provider. Otherwise Email asks the chosen classification provider through Valley’s shared classification API: any connection under AI Providers that offers classification (Jev, Laya, later providers) runs the same groups, and Email contains no provider-specific code. A group qualifies only at or above its threshold, its subgroups are considered only once it qualified, and the deepest qualifying group wins. The first start moves the former shared-group categories into every account with the same ids, so existing assignments keep resolving.
 
-Automatic grouping is opt-in and applies to newly arrived, unread, non-spam Inbox messages after a sync baseline. Its default allowance is 100 messages per account in a rolling 24 hours. Initial syncs, historical imports, cache rebuilds, and UIDVALIDITY resets do not automatically enqueue old mail. Use Classify existing mail to select historical messages explicitly. Provider limits and budgets apply to both paths.
+Laya runs separately on loopback; model installation and server lifecycle stay outside Valley. There is no automatic cloud fallback.
+
+Smart groups are opt-in with one switch; turning it on gives accounts without groups a small set of starter groups, and an account whose groups were all removed is never sent to the provider. Automatic grouping applies to newly arrived, unread, non-spam Inbox messages after a sync baseline. Its default allowance is 100 messages per account in a rolling 24 hours. Initial syncs, historical imports, cache rebuilds, and UIDVALIDITY resets do not automatically enqueue old mail. Use Classify existing mail to select historical messages explicitly. Provider limits and budgets apply to both paths.
 
 Categories never move messages or change spam status. Manual category assignments remain durable across cache rebuilds and block in-flight automatic results until Reset to automatic. Queue records contain identifiers and progress; provider input includes sender, subject, and normalized body without attachments or remote images. Interrupted or ambiguous requests require an explicit action before retrying.
 

@@ -162,3 +162,5 @@ export const Microsoft = (p: IconProps): ReactElement => (
 export const Paperclip = (p: IconProps): ReactElement => <Svg {...p}><path d="m21 11-9 9a6 6 0 0 1-8-8L14 2a4 4 0 0 1 6 6L9 19a2 2 0 0 1-3-3L16 6" /></Svg>
 
 export const Filter = (p: IconProps): ReactElement => <Svg {...p}><path d="M4 4h16l-6 7v7l-4 2v-9z" /></Svg>
+
+export const Tag = (p: IconProps): ReactElement => <Svg {...p}><path d="M3 12V4a1 1 0 0 1 1-1h8l9 9-9 9z" /><circle cx="7.5" cy="7.5" r="1.5" /></Svg>

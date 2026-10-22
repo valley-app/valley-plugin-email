@@ -128,6 +128,9 @@ export interface EmailFilters {
   vip?: 'all' | 'vip' | 'others'
   spam?: 'default' | 'spam' | 'not-spam' | 'all'
   categoryId?: string
+  /** The opened group plus its subgroups; `categoryId` names the opened group for labels. */
+  categoryIds?: string[]
+  categoryAccountId?: string
 }
 
 export interface EmailMessageQuery {

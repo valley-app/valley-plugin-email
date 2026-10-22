@@ -4,6 +4,7 @@ import type { ValleyPluginManifest } from '@valley/plugin-sdk/types'
 import type { AiClassificationResult } from '@valley/plugin-sdk/ai'
 import config from '../config.json'
 import { createClassificationQueue } from '../src/classificationQueue'
+import { createSmartGroupsStore } from '../src/smartGroups'
 import { emailStoreContext, mergeFolder } from '../src/backend/cache'
 
 const disposers: (() => Promise<void>)[] = []
@@ -15,9 +16,10 @@ async function setup(count = 1) {
   await mergeFolder(emailStoreContext(mock.api.data), 'forest', 'INBOX', Array.from({ length: count }, (_, index) => ({ uid: index + 1, messageId: `<fern-${index}@example.test>`, from: 'fern@example.test', to: 'moss@example.test', subject: `Fern survey ${index}`, date: '2026-01-01T00:00:00.000Z', text: 'Fern survey', snippet: '', flags: [], hasAttachments: false })))
   const ids = mock.datasets.get('canopy-mail.messages')!.map(row => String(row.id))
   const publish = vi.fn()
-  const queue = createClassificationQueue(mock.api, publish, async () => {})
-  disposers.push(queue.dispose)
-  return { mock, queue, ids, publish }
+  const groups = createSmartGroupsStore(mock.api, () => [{ id: 'forest', address: 'forest@example.test' }])
+  const queue = createClassificationQueue(mock.api, groups, publish, async () => {})
+  disposers.push(queue.dispose, async () => groups.dispose())
+  return { mock, queue, ids, publish, groups }
 }
 const answer: AiClassificationResult = { status: 'completed', categoryId: 'canopy', confidence: 1, probabilities: { canopy: 1, uncategorized: 0 }, model: 'english', inputTokens: 5, outputTokens: 1 }
 
@@ -60,12 +62,12 @@ describe('durable classification queue', () => {
   })
 
   it('discards an in-flight result after category configuration changes', async () => {
-    const { mock, queue, ids } = await setup()
+    const { mock, queue, ids, groups } = await setup()
     let finish!: (result: AiClassificationResult) => void
     mock.api.ai.classify = vi.fn(() => new Promise<AiClassificationResult>(resolve => { finish = resolve }))
     await queue.enqueue(ids)
     await vi.waitFor(() => expect(mock.api.ai.classify).toHaveBeenCalledOnce())
-    await mock.api.settings.set('grouping', { automatic: true, dailyLimit: 100, categories: { canopy: 'Wetland canopy research' } })
+    await groups.update(config => { config.accounts.forest.groups[0].decision = 'Wetland canopy research' })
     finish(answer)
     await vi.waitFor(async () => expect((await mock.api.data.dataset('classification_jobs').query({})).rows[0].status).toBe('cancelled'))
     expect(await mock.api.data.dataset('assignments').get({ id: ids[0] })).toBeNull()
@@ -88,11 +90,11 @@ describe('durable classification queue', () => {
 })
 
 it('reserves one shared rolling allowance across two queues and skips incomplete messages', async () => {
-  const { mock, queue, ids } = await setup(120)
-  await mock.api.settings.set('grouping', { automatic: true, dailyLimit: 10, categories: { canopy: 'Forest canopy research' } })
+  const { mock, queue, ids, groups } = await setup(120)
+  await groups.update(config => { config.dailyLimit = 10 })
   mock.api.ai.classify = vi.fn(async () => answer)
   await mock.api.data.dataset('messages').update({ id: ids[0] }, { complete: false })
-  const other = createClassificationQueue(mock.api, () => {}, async () => {})
+  const other = createClassificationQueue(mock.api, groups, () => {}, async () => {})
   disposers.push(other.dispose)
   await Promise.all([queue.enqueue(ids.slice(0, 70), true), other.enqueue(ids.slice(60), true)])
   await vi.waitFor(async () => expect(await mock.api.data.dataset('classification_jobs').count({ status: 'completed' })).toBe(10))
