@@ -256,4 +256,18 @@ describe('sent mail is kept on the server and locally (F15)', () => {
     expect(await mail.uids('Sent')).toEqual([5])
     await mail.dispose()
   })
+  it.each([
+    ['a refused APPEND', () => new transport.ImapRefusal('NO [OVERQUOTA] mailbox full')],
+    ['an APPEND without an answer', () => new transport.MailActionUncertain('Mail server closed the connection.')]
+  ])('never reports %s as a failed or uncertain send', async (_case, failure) => {
+    const mail = await backend({ INBOX: { uidValidity: 7, messages: [] }, Sent: { uidValidity: 8, messages: [] } })
+    vi.spyOn(transport, 'sendMail').mockImplementation(async (_api, _account, _input, _automatic, accepted) => { accepted?.(new TextEncoder().encode('Subject: x\r\n\r\nbody\r\n')); return '<m6@birds.example>' })
+    vi.spyOn(transport, 'appendSentMessage').mockRejectedValue(failure())
+    const result = await send(mail)
+    expect(result).toMatchObject({ ok: true })
+    expect(result).not.toHaveProperty('outcome')
+    expect(result).not.toHaveProperty('code')
+    expect(await mail.uids('Sent')).toHaveLength(1)
+    await mail.dispose()
+  })
 })

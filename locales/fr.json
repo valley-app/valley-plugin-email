@@ -293,6 +293,8 @@
   "email.dataset.assignments": "Catégories attribuées aux e-mails",
   "email.dataset.classification_jobs": "File de classification des e-mails",
   "email.backend.mailboxChanged": "La boîte a changé sur le serveur. Actualisez-la avant cette action.",
+  "email.backend.actionNotApplied": "Non appliqué. Le message n’a pas été modifié : {{reason}}",
+  "email.backend.actionUncertain": "Résultat inconnu. La modification a peut-être été appliquée sur le serveur : {{reason}}",
   "notification.newMail": "Nouveau message",
   "notification.sendFailed": "Échec de l’envoi",
   "notification.sendUncertain": "Le message a peut-être été envoyé",

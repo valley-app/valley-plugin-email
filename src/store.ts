@@ -9,7 +9,7 @@ import { createSyncController } from './syncController'
 import { createAccountsController } from './accountsController'
 import { createDraftController } from './draftController'
 import type { RetainedDraft } from './draftRepository'
-import { createMessageController, messageKey } from './messageController'
+import { createMessageController, messageKey, type EmailActionOptions } from './messageController'
 import { createMailboxController, type EmailNavigation } from './mailboxController'
 export { messageKey } from './messageController'
 import type { EmailAddress, EmailFilters, EmailMailboxView, EmailMessageAction, EmailMessageDetail, EmailMessageRef, EmailMessageSummary } from './mailTypes'
@@ -76,7 +76,7 @@ export interface EmailStore {
   sync(): Promise<void>
   /** Sync unless every account of the current folder view was synced within the last minute. */
   syncIfStale(): Promise<void>
-  act(message: EmailMessageRef, action: EmailMessageAction): Promise<boolean>
+  act(message: EmailMessageRef, action: EmailMessageAction, options?: EmailActionOptions): Promise<boolean>
   setPlainText(message: EmailMessageRef, htmlContent: boolean, plainText: boolean): void
   dismissError(): void
   setQuery(query: string): void

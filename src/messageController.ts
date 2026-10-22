@@ -50,6 +50,19 @@ export async function loadDeferredBody(mail: Pick<EmailDriver, 'loadMessageConte
   return { ...(fresh ?? message), ...body, bodyDeferred: false, bodyError: undefined, ...(shown < available ? { bodyTruncated: { shown, total: available } } : {}) }
 }
 
+export interface EmailActionOptions {
+  /** Wait for an action already in flight instead of refusing (the automatic mark-read on open). */
+  wait?: boolean
+  onFailure?(outcome: 'not-applied' | 'unknown'): void
+}
+
+type FlagChange = { add?: string; remove?: string }
+const FLAG_CHANGES: Partial<Record<EmailMessageAction, FlagChange>> = { 'mark-read': { add: '\\Seen' }, 'mark-unread': { remove: '\\Seen' }, flag: { add: '\\Flagged' }, unflag: { remove: '\\Flagged' } }
+const changed = (flags: string[], change: FlagChange): string[] => {
+  const next = flags.filter((flag) => flag !== change.remove)
+  return change.add && !next.includes(change.add) ? [...next, change.add] : next
+}
+
 export function createMessageController(mail: EmailDriver, ports: MessagePorts) {
   let requestId = 0
   let messageRevision = 0
@@ -57,6 +70,26 @@ export function createMessageController(mail: EmailDriver, ports: MessagePorts) 
   let detailId = 0
   let queryCancellation: AbortController | undefined
   let detailCancellation: AbortController | undefined
+  let running: Promise<boolean> | null = null
+  // Read and flag changes show at once and stay shown across list reloads until the server answers.
+  const pendingFlags = new Map<string, FlagChange[]>()
+  const addPending = (key: string, change: FlagChange): void => { pendingFlags.set(key, [...pendingFlags.get(key) ?? [], change]) }
+  const dropPending = (key: string, change: FlagChange): void => {
+    const rest = (pendingFlags.get(key) ?? []).filter((entry) => entry !== change)
+    if (rest.length) pendingFlags.set(key, rest); else pendingFlags.delete(key)
+  }
+  const pendingRead = (key: string): boolean => (pendingFlags.get(key) ?? []).some((change) => change.add === '\\Seen')
+  const withPending = <T extends EmailMessageRef & { flags: string[] }>(message: T): T => {
+    const changes = pendingFlags.get(messageKey(message))
+    return changes ? { ...message, flags: changes.reduce(changed, message.flags) } : message
+  }
+  const showFlags = (key: string, change: FlagChange): void => {
+    const { messages, selectedMessage } = ports.snapshot()
+    const patch: Partial<EmailSnapshot> = {}
+    if (messages.some((message) => messageKey(message) === key)) patch.messages = messages.map((message) => messageKey(message) === key ? { ...message, flags: changed(message.flags, change) } : message)
+    if (selectedMessage && messageKey(selectedMessage) === key) patch.selectedMessage = { ...selectedMessage, flags: changed(selectedMessage.flags, change) }
+    if (patch.messages || patch.selectedMessage) ports.set(patch)
+  }
   const messageQuery = (append = false) => ({ accountId: ports.snapshot().selectedAccountId!, view: ports.snapshot().view, folder: ports.snapshot().selectedFolder,
     accountIds: ports.activeAccountIds(), filters: ports.snapshot().filters, query: ports.snapshot().query, cursor: append ? ports.snapshot().cursor : undefined })
   function loadMessages(append = false): Promise<void> {
@@ -79,7 +112,7 @@ export function createMessageController(mail: EmailDriver, ports: MessagePorts) 
         const result = await mail.queryMessages(input, cancellation.signal)
         if (token !== requestId || !ports.active()) return
         if (!result.ok || !result.data) throw new Error(result.error || uiText('email.loadFailed'))
-        const messages = append ? [...ports.snapshot().messages, ...result.data.messages.filter((message) => !ports.snapshot().messages.some((current) => current.id === message.id))] : result.data.messages
+        const messages = (append ? [...ports.snapshot().messages, ...result.data.messages.filter((message) => !ports.snapshot().messages.some((current) => current.id === message.id))] : result.data.messages).map(withPending)
         ports.set({ messages, cursor: result.data.cursor, loadingMessages: false })
         void ports.resolveContacts()
       } catch (error) {
@@ -101,32 +134,56 @@ export function createMessageController(mail: EmailDriver, ports: MessagePorts) 
       if (!message) throw new Error(uiText('email.selectionMissing'))
       if (message.bodyDeferred) {
         const retried = Boolean(message.bodyError)
-        ports.set({ selectedMessage: message, selectedUid: message.uid })
+        ports.set({ selectedMessage: withPending(message), selectedUid: message.uid })
         message = await loadDeferredBody(mail, message, cancellation.signal)
         if (token !== detailId || !ports.active()) return
         if (retried) { ++messageRevision; void loadMessages() }
       }
-      ports.set({ selectedMessage: message, selectedUid: message?.uid ?? null, bodyOverride: null, loadingMessage: false })
+      ports.set({ selectedMessage: withPending(message), selectedUid: message?.uid ?? null, bodyOverride: null, loadingMessage: false })
       ports.updateTitle()
       if (recordHistory) ports.pushHistory()
       void ports.resolveContacts()
-      if (message && !message.flags.includes('\\Seen')) void act(message, 'mark-read')
+      if (!message.flags.includes('\\Seen') && !pendingRead(messageKey(message))) void act(message, 'mark-read', { wait: true })
     } catch (error) { if (token === detailId) { ports.set({ loadingMessage: false }); ports.report(error) } }
   }
   function openMessage(input: EmailMessageRef | null): void {
     if (!ports.active()) return
     if (input === null) { ++detailId; detailCancellation?.abort(); ports.set({ selectedMessage: null, selectedUid: null, composing: false }); ports.updateTitle(); return }
+    // The first open marks an unread message read at once, also while another action is still in flight.
+    const summary = ports.snapshot().messages.find((message) => messageKey(message) === messageKey(input))
+    if (summary && !summary.flags.includes('\\Seen') && !pendingRead(messageKey(summary))) void act(summary, 'mark-read', { wait: true })
     void readSelected(input)
   }
-  async function act(ref: EmailMessageRef, action: EmailMessageAction): Promise<boolean> {
-    if (!ports.active() || ports.snapshot().actionUid !== null) return false
+  async function act(ref: EmailMessageRef, action: EmailMessageAction, options: EmailActionOptions = {}): Promise<boolean> {
+    const refuse = (): false => { options.onFailure?.('not-applied'); return false }
+    if (!ports.active()) return refuse()
     const key = messageKey(ref)
+    const flagChange = FLAG_CHANGES[action]
+    const change = flagChange && { ...flagChange }
+    if (ports.snapshot().actionUid !== null) {
+      if (!options.wait) return refuse()
+      if (change) { addPending(key, change); showFlags(key, change) }
+      while (ports.snapshot().actionUid !== null && running) await running
+      if (!ports.active()) { if (change) dropPending(key, change); return refuse() }
+    } else if (change) { addPending(key, change); showFlags(key, change) }
+    const run = apply(ref, key, action, change, options)
+    running = run
+    try { return await run } finally { if (running === run) running = null }
+  }
+  async function apply(ref: EmailMessageRef, key: string, action: EmailMessageAction, change: FlagChange | undefined, options: EmailActionOptions): Promise<boolean> {
     const previous = ports.snapshot().selectedMessage
     const generation = detailId
+    let classified = false
     ports.set({ actionUid: ref.uid, error: null })
     try {
       const result = await mail.applyMessageAction({ accountId: ref.accountId, folder: ref.folder, uid: ref.uid, uidValidity: ref.uidValidity, action })
-      if (!result.ok) throw new Error(result.error || uiText('email.actionFailed'))
+      if (!result.ok) {
+        // A refusal changed nothing and an unknown outcome is not shown as done: the row and the open message return to the cached flags.
+        if (change) { dropPending(key, change); showFlags(key, { add: change.remove, remove: change.add }) }
+        classified = true
+        options.onFailure?.(result.outcome === 'not-applied' ? 'not-applied' : 'unknown')
+        throw new Error(result.error || uiText('email.actionFailed'))
+      }
       if (!ports.active()) return true
       ++messageRevision
       if (generation === detailId && previous && messageKey(previous) === key) {
@@ -141,8 +198,8 @@ export function createMessageController(mail: EmailDriver, ports: MessagePorts) 
       if (ports.activeAccountIds().includes(ref.accountId)) await loadMessages()
       ports.updateTitle()
       return true
-    } catch (error) { ports.report(error); return false }
-    finally { ports.set({ actionUid: null }) }
+    } catch (error) { if (!classified) options.onFailure?.('unknown'); ports.report(error); return false }
+    finally { if (change) dropPending(key, change); ports.set({ actionUid: null }) }
   }
   return {
     loadMessages, openMessage, act,

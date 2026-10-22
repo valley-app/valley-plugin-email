@@ -178,7 +178,8 @@ async function applyFlags(ref: EmailMessageRef, values: FlagValues): Promise<voi
   const store = getStore()
   const applied: string[] = []
   for (const [key, value] of Object.entries(values)) {
-    if (!(await store.act(ref, key === 'read' ? value ? 'mark-read' : 'mark-unread' : value ? 'flag' : 'unflag'))) throw new Error(`${store.getSnapshot().error || uiText('email.actionFailed')}${applied.length ? uiText('email.error.partial', { value: applied.join(', ') }) : uiText('email.error.retry')}`)
+    let outcome: 'not-applied' | 'unknown' = 'unknown'
+    if (!(await store.act(ref, key === 'read' ? value ? 'mark-read' : 'mark-unread' : value ? 'flag' : 'unflag', { onFailure: (result) => { outcome = result } }))) throw Object.assign(new Error(`${store.getSnapshot().error || uiText('email.actionFailed')}${applied.length ? uiText('email.error.partial', { value: applied.join(', ') }) : uiText('email.error.retry')}`), { outcome: applied.length ? 'unknown' : outcome })
     applied.push(key)
   }
 }

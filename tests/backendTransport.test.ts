@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { appendSentMessage, applyMessageAction, decodeBodyPart, decodeMailbox, encodeMailbox, fetchFolder, listFolders, MailSendError, parseImapResponse, parseMail, sendMail, verifyImap, verifySmtp, type MailTransportApi } from '../src/backend/transport'
+import { appendSentMessage, applyMessageAction, decodeBodyPart, decodeMailbox, encodeMailbox, fetchFolder, listFolders, MailActionUncertain, MailSendError, parseImapResponse, parseMail, sendMail, verifyImap, verifySmtp, type MailTransportApi } from '../src/backend/transport'
 import type { EmailAccount } from '../src/mailTypes'
 import { decodeBytes, encodeBytes } from '../src/backend/encoding'
+import { MailRefusal } from '../src/backend/automation'
 
 const account: EmailAccount = { id: 'mail-fixture', provider: 'pureemail', address: 'sender@example.test', displayName: 'Sender', createdAt: 0,
   imap: { host: 'imap.example.test', port: 993, secure: true }, smtp: { host: 'smtp.example.test', port: 465, secure: true } }
@@ -154,6 +155,46 @@ describe('package-owned IMAP and SMTP', () => {
     await expect(applyMessageAction(fixture.api, account, 'INBOX', 72, 'trash')).rejects.toThrow('cannot safely move')
     expect(fixture.writes.join('')).not.toMatch(/COPY|STORE|EXPUNGE/)
     expect(fixture.api.network.close).toHaveBeenCalled()
+  })
+
+  it.each([
+    ['a tagged NO to the flag change', `V3 OK [READ-WRITE] selected\r\nV4 NO [READ-ONLY] mailbox is read-only\r\n`, 'flag', '[READ-ONLY] mailbox is read-only'],
+    ['a tagged BAD to the flag change', `V3 OK selected\r\nV4 BAD command refused\r\n`, 'mark-read', 'command refused'],
+    ['a tagged NO to the move', `V3 OK selected\r\n* LIST (\\Trash) "/" "Trash"\r\nV4 OK listed\r\nV5 NO [CANNOT] move refused\r\n`, 'trash', '[CANNOT] move refused'],
+    ['a refused folder selection', `V3 NO [NONEXISTENT] no such mailbox\r\n`, 'flag', 'no such mailbox']
+  ] as const)('reports %s as not applied', async (_case, replies, action, reason) => {
+    const fixture = transport(`${login()}${replies}`)
+    const failure = await applyMessageAction(fixture.api, account, 'INBOX', 72, action).catch((error: unknown) => error)
+    expect(failure).toBeInstanceOf(MailRefusal)
+    expect(failure).toMatchObject({ code: 'ACTION_NOT_APPLIED', outcome: 'not-applied' })
+    expect((failure as Error).message).toContain(reason)
+    expect((failure as Error).message).toContain('Not applied')
+  })
+
+  it('reports a failure before any mailbox change was sent as not applied', async () => {
+    const fixture = transport('* OK ready\r\n* CAPABILITY IMAP4rev1 AUTH=PLAIN MOVE\r\nV1 OK capabilities\r\n+ \r\nV2 NO [AUTHENTICATIONFAILED] rejected\r\n')
+    await expect(applyMessageAction(fixture.api, account, 'INBOX', 72, 'flag')).rejects.toMatchObject({ code: 'ACTION_NOT_APPLIED', outcome: 'not-applied' })
+    expect(fixture.writes.join('')).not.toMatch(/SELECT|UID STORE/)
+  })
+
+  it.each([
+    ['the connection closes after the flag change was sent', `V3 OK selected\r\n`, 'flag', 'UID STORE 72 +FLAGS.SILENT (\\Flagged)'],
+    ['the server ends the session during the flag change', `V3 OK selected\r\n* BYE shutting down\r\n`, 'mark-unread', 'UID STORE 72 -FLAGS.SILENT (\\Seen)'],
+    ['the connection closes after the move was sent', `V3 OK selected\r\n* LIST (\\Archive) "/" "Archive"\r\nV4 OK listed\r\n`, 'archive', 'UID MOVE 72 "Archive"']
+  ] as const)('keeps the outcome unknown when %s', async (_case, replies, action, command) => {
+    const fixture = transport(`${login()}${replies}`)
+    const failure = await applyMessageAction(fixture.api, account, 'INBOX', 72, action).catch((error: unknown) => error)
+    expect(failure).toBeInstanceOf(MailActionUncertain)
+    expect(failure).toMatchObject({ code: 'ACTION_OUTCOME_UNKNOWN', outcome: 'unknown' })
+    expect((failure as Error).message).toContain('Outcome unknown')
+    expect(fixture.writes.join('')).toContain(command)
+  })
+
+  it('keeps the outcome unknown when a copy succeeded and its follow-up is refused', async () => {
+    const fixture = transport(`${login('IMAP4rev1 AUTH=PLAIN UIDPLUS')}V3 OK selected\r\n* LIST (\\Trash) "/" "Trash"\r\nV4 OK listed\r\nV5 OK [COPYUID 9 72 105] copied\r\nV6 NO store refused\r\n`)
+    await expect(applyMessageAction(fixture.api, account, 'INBOX', 72, 'trash')).rejects.toMatchObject({ code: 'ACTION_OUTCOME_UNKNOWN', outcome: 'unknown' })
+    expect(fixture.writes.join('')).toContain('UID COPY 72 "Trash"')
+    expect(fixture.writes.join('')).not.toContain('EXPUNGE')
   })
 
   it('sends MIME through TLS with envelope Bcc recipients and no Bcc header', async () => {

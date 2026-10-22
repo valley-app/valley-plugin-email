@@ -6,7 +6,7 @@ import type { CachedMessage, EmailAccount, EmailMailbox, EmailMessageAction, Ema
 import { decodeBytes, encodeBytes } from './encoding'
 import { parseEmailAddresses } from './query'
 import { digest } from './identity'
-import { automationHeaders } from './automation'
+import { automationHeaders, MailRefusal } from './automation'
 
 export interface MailTransportApi {
   network: Pick<PluginNetworkApi, 'fetch' | 'open' | 'read' | 'write' | 'startTls' | 'close'>
@@ -62,8 +62,14 @@ export class MailSendError extends Error {
   constructor(message: string, readonly outcome: 'not-applied' | 'unknown') { super(message) }
 }
 
-/** A tagged NO or BAD reply: the server refused one command and the connection stays usable. */
+/** A tagged NO or BAD reply: the server answered the command and refused it; the connection stays usable. */
 export class ImapRefusal extends Error {}
+
+/** A message change whose command was sent but whose result never arrived (lost connection, session end, no reply). */
+export class MailActionUncertain extends Error {
+  readonly code = 'ACTION_OUTCOME_UNKNOWN'
+  readonly outcome = 'unknown' as const
+}
 
 export function accountEndpoint(account: EmailAccount, kind: 'imap' | 'smtp'): PluginSocketEndpoint {
   const endpoint = account[kind]
@@ -721,8 +727,15 @@ export async function verifyImap(api: MailTransportApi, account: EmailAccount): 
   await withImap(api, account, (connection) => connection.command('EXAMINE "INBOX"').then(() => undefined))
 }
 
+/**
+ * Applies one read/flag change or move. Failures are classified for the caller: nothing that can change the mailbox was sent yet,
+ * or the server refused it with a tagged NO/BAD → `MailRefusal` (not applied); the change was sent and no answer arrived, or a
+ * later step failed after a copy succeeded → `MailActionUncertain` (outcome unknown).
+ */
 export async function applyMessageAction(api: MailTransportApi, account: EmailAccount, folder: string, uid: number, action: EmailMessageAction, uidValidity?: number): Promise<{ destinationFolder?: string; destinationUid?: number; destinationUidValidity?: number }> {
-  return withImap(api, account, async (connection) => {
+  let sent = false, copied = false
+  try { return await withImap(api, account, async (connection) => {
+    const change = (command: string): Promise<ImapReply[]> => { sent = true; return connection.command(command) }
     const selected = await connection.command(`SELECT ${quote(folder)}`)
     const epoch = selected.map(reply => /\[UIDVALIDITY (\d+)\]/i.exec(reply.line)?.[1]).find(Boolean)
     if (uidValidity !== undefined && Number(epoch) !== uidValidity) throw new Error(t('email.backend.mailboxChanged'))
@@ -733,10 +746,11 @@ export async function applyMessageAction(api: MailTransportApi, account: EmailAc
       if (!destinationFolder) throw new Error(t('email.backend.mailboxMissing', { mailbox: t(`email.backend.${action === 'archive' ? 'archive' : action === 'junk' ? 'junk' : 'trash'}`) }))
       if (destinationFolder === folder) throw new Error(t('email.backend.alreadyMoved', { mailbox: destinationFolder }))
       let replies: ImapReply[]
-      if (connection.capabilities.has('MOVE') || connection.capabilities.has('IMAP4REV2')) replies = await connection.command(`UID MOVE ${uid} ${quote(destinationFolder)}`)
+      if (connection.capabilities.has('MOVE') || connection.capabilities.has('IMAP4REV2')) replies = await change(`UID MOVE ${uid} ${quote(destinationFolder)}`)
       else {
         if (!connection.capabilities.has('UIDPLUS')) throw new Error(t('email.backend.moveUnsupported'))
-        replies = await connection.command(`UID COPY ${uid} ${quote(destinationFolder)}`)
+        replies = await change(`UID COPY ${uid} ${quote(destinationFolder)}`)
+        copied = true
         await connection.command(`UID STORE ${uid} +FLAGS.SILENT (\\Deleted)`)
         await connection.command(`UID EXPUNGE ${uid}`)
       }
@@ -744,9 +758,13 @@ export async function applyMessageAction(api: MailTransportApi, account: EmailAc
       return { destinationFolder, ...(match ? { destinationUid: Number(match[2]), destinationUidValidity: Number(match[1]) } : {}) }
     }
     const flag = action === 'flag' || action === 'unflag' ? '\\Flagged' : '\\Seen'
-    await connection.command(`UID STORE ${uid} ${action === 'mark-unread' || action === 'unflag' ? '-' : '+'}FLAGS.SILENT (${flag})`)
+    await change(`UID STORE ${uid} ${action === 'mark-unread' || action === 'unflag' ? '-' : '+'}FLAGS.SILENT (${flag})`)
     return {}
-  })
+  }) } catch (error) {
+    const reason = mailDiagnostic(error)
+    if (!sent || error instanceof ImapRefusal && !copied) throw new MailRefusal('ACTION_NOT_APPLIED', t('email.backend.actionNotApplied', { reason }))
+    throw new MailActionUncertain(t('email.backend.actionUncertain', { reason }))
+  }
 }
 
 async function smtpReply(connection: Connection, expected: number[]): Promise<string[]> {
