@@ -210,6 +210,7 @@
   "email.backend.archive": "Archive",
   "email.backend.junk": "Junk",
   "email.backend.trash": "Trash",
+  "email.backend.sent": "Sent",
   "email.error.input": "Expected an email selection object.",
   "email.error.accountIds": "accountIds must be an array of account ids.",
   "email.error.view": "Unsupported mailbox view.",
@@ -326,5 +327,17 @@
   "email.settings.connectionChecking": "Testing…",
   "email.settings.connectionOk": "Authenticated",
   "email.settings.connectionFailed": "Connection failed",
-  "email.backend.cachedFoldersWarning": "Showing cached folders. Live connection failed: {{error}}"
+  "email.backend.cachedFoldersWarning": "Showing cached folders. Live connection failed: {{error}}",
+  "email.backend.uidValidityMissing": "The mail server did not report the folder’s UIDVALIDITY; the cached folder was left unchanged.",
+  "email.backend.unavailableSubject": "Message could not be downloaded",
+  "email.backend.unavailableSnippet": "Open the message to try again.",
+  "email.backend.messageMissing": "The mail server did not return this message.",
+  "email.backend.bodyTooLarge": "This message body is too large to display ({{size}} MB).",
+  "email.attachments": "Attachments",
+  "email.attachment.save": "Save {{name}}",
+  "email.attachment.saved": "Saved to {{path}}",
+  "email.attachment.saveFailed": "The attachment could not be saved.",
+  "email.attachment.tooLarge": "Attachments above {{size}} MB cannot be saved here yet.",
+  "email.body.loadFailed": "The message body could not be loaded.",
+  "email.body.truncated": "This message is too long to show completely: showing the first {{shown}} MB of {{total}} MB."
 }

@@ -7,6 +7,7 @@ import { ErrorNotice } from './Notice'
 import { MessageActions } from './MessageActions'
 import { ContactAvatar, contactName, Person } from './People'
 import { MessageBody } from './MessageBody'
+import { Attachments, BodyNote } from './Attachments'
 import { Inbox, Plus, Mail } from './icons'
 import { uiText } from './localization'
 import { formatEmailTimestamp, messageKey } from './store'
@@ -63,6 +64,8 @@ export const Page: React.FC<MainWorkspaceViewProps> = ({ navigation }) => {
             <MessageOrganization message={selected} />
             </div>
           </header>
+          <Attachments message={selected} />
+          <BodyNote message={selected} />
           <div className="email-reader-body">{snap.loadingMessage ? <div className="email-message-loading"><api.ui.ContentLoader label={uiText('auto.33ce417454bf')} compact /></div> : <MessageBody message={selected} plain={plainText} />}</div>
         </div>
       </article> : <div className="email-placeholder"><div className="email-placeholder-content">

@@ -3,7 +3,7 @@ import { decodeText, encodeText } from './encoding'
 import { addressParser } from 'postal-mime'
 import type { EmailAddress, EmailMessageDetail, EmailMessageQuery, EmailMessageRef, EmailMessageSummary } from '../mailTypes'
 import type { DatasetPage, DatasetRecord, DatasetWhere } from '@valley/plugin-sdk/datasets'
-import { datasetRequest as request, ensureMembershipFlags, folderProjection, projectAssignments, queryAll, type EmailStoreContext } from './cache'
+import { datasetRequest as request, ensureMembershipFlags, folderProjection, projectAssignments, queryAll, readStructure, type EmailStoreContext } from './cache'
 import { readAutomationHeaders } from './automation'
 
 export function parseEmailAddresses(value: string, strict = false): EmailAddress[] {
@@ -105,8 +105,17 @@ export async function readMessage(scope: EmailStoreContext, ref: EmailMessageRef
   if (!row) return null
   const memberships = await queryAll(scope, scope.datasets.folderMessages, { accountId: ref.accountId, messageId: String(membership.messageId) })
   const others = memberships.filter((entry) => entry.folder !== ref.folder || entry.uid !== ref.uid)
-  return { ...summarize(row, [membership, ...others]), ...(typeof row.text === 'string' ? { text: row.text } : {}), ...(typeof row.html === 'string' ? { html: row.html } : {}) }
+  const structure = readStructure(row.structure)
+  const text = typeof row.text === 'string' ? row.text : undefined, html = typeof row.html === 'string' ? row.html : undefined
+  // A reply carries at most INLINE_BODY_CHARACTERS of body; a larger or not yet downloaded body is loaded in slices by the reader.
+  const deferred = Boolean(structure?.deferred?.length || structure?.failure) || (text?.length ?? 0) + (html?.length ?? 0) > INLINE_BODY_CHARACTERS
+  const attachments = (structure?.attachments ?? []).map((part, index) => ({ index, filename: part.filename, mimeType: part.mimeType, size: part.size, ...(part.inline ? { inline: true } : {}) }))
+  return { ...summarize(row, [membership, ...others]), ...(!deferred && text !== undefined ? { text } : {}), ...(!deferred && html !== undefined ? { html } : {}),
+    ...(attachments.length ? { attachments } : {}), ...(deferred ? { bodyDeferred: true } : {}), ...(structure?.failure ? { bodyError: structure.failure } : {}) }
 }
+
+/** Characters of text and HTML returned inline by readMessage; a command operation reply is bounded at 4 MiB of UTF-8. */
+export const INLINE_BODY_CHARACTERS = 1024 * 1024
 
 export async function cacheMailboxes(scope: EmailStoreContext, accountId: string, mailboxes: { path: string; name: string; specialUse?: string; delimiter?: string; selectable: boolean }[]): Promise<void> {
   if (!mailboxes.length) return

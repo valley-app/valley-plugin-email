@@ -210,6 +210,7 @@
   "email.backend.archive": "Archives",
   "email.backend.junk": "Indésirables",
   "email.backend.trash": "Corbeille",
+  "email.backend.sent": "Envoyés",
   "email.error.input": "Un objet de sélection de message est attendu.",
   "email.error.accountIds": "accountIds doit être une liste d’identifiants de comptes.",
   "email.error.view": "Vue de boîte aux lettres non prise en charge.",
@@ -326,5 +327,17 @@
   "email.settings.connectionChecking": "Vérification…",
   "email.settings.connectionOk": "Authentifié",
   "email.settings.connectionFailed": "Échec de connexion",
-  "email.backend.cachedFoldersWarning": "Dossiers en cache affichés. Échec de connexion : {{error}}"
+  "email.backend.cachedFoldersWarning": "Dossiers en cache affichés. Échec de connexion : {{error}}",
+  "email.backend.uidValidityMissing": "Le serveur de messagerie n’a pas indiqué l’UIDVALIDITY du dossier ; le dossier en cache n’a pas été modifié.",
+  "email.backend.unavailableSubject": "Le message n’a pas pu être téléchargé",
+  "email.backend.unavailableSnippet": "Ouvrez le message pour réessayer.",
+  "email.backend.messageMissing": "Le serveur de messagerie n’a pas renvoyé ce message.",
+  "email.backend.bodyTooLarge": "Le contenu de ce message est trop volumineux pour être affiché ({{size}} Mo).",
+  "email.attachments": "Pièces jointes",
+  "email.attachment.save": "Enregistrer {{name}}",
+  "email.attachment.saved": "Enregistré dans {{path}}",
+  "email.attachment.saveFailed": "La pièce jointe n’a pas pu être enregistrée.",
+  "email.attachment.tooLarge": "Les pièces jointes de plus de {{size}} Mo ne peuvent pas encore être enregistrées ici.",
+  "email.body.loadFailed": "Le contenu du message n’a pas pu être chargé.",
+  "email.body.truncated": "Ce message est trop long pour être affiché en entier : affichage des {{shown}} premiers Mo sur {{total}} Mo."
 }

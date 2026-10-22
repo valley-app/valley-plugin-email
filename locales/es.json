@@ -210,6 +210,7 @@
   "email.backend.archive": "Archivo",
   "email.backend.junk": "Correo no deseado",
   "email.backend.trash": "Papelera",
+  "email.backend.sent": "Enviados",
   "email.error.input": "Se esperaba un objeto de selección de correo.",
   "email.error.accountIds": "accountIds debe ser una lista de identificadores de cuentas.",
   "email.error.view": "Vista del buzón no compatible.",
@@ -326,5 +327,17 @@
   "email.settings.connectionChecking": "Verificando…",
   "email.settings.connectionOk": "Autenticado",
   "email.settings.connectionFailed": "Error de conexión",
-  "email.backend.cachedFoldersWarning": "Se muestran carpetas en caché. Error de conexión: {{error}}"
+  "email.backend.cachedFoldersWarning": "Se muestran carpetas en caché. Error de conexión: {{error}}",
+  "email.backend.uidValidityMissing": "El servidor de correo no informó el UIDVALIDITY de la carpeta; la carpeta en caché no se modificó.",
+  "email.backend.unavailableSubject": "No se pudo descargar el mensaje",
+  "email.backend.unavailableSnippet": "Abre el mensaje para volver a intentarlo.",
+  "email.backend.messageMissing": "El servidor de correo no devolvió este mensaje.",
+  "email.backend.bodyTooLarge": "El cuerpo de este mensaje es demasiado grande para mostrarlo ({{size}} MB).",
+  "email.attachments": "Adjuntos",
+  "email.attachment.save": "Guardar {{name}}",
+  "email.attachment.saved": "Guardado en {{path}}",
+  "email.attachment.saveFailed": "No se pudo guardar el adjunto.",
+  "email.attachment.tooLarge": "Los adjuntos de más de {{size}} MB aún no se pueden guardar aquí.",
+  "email.body.loadFailed": "No se pudo cargar el cuerpo del mensaje.",
+  "email.body.truncated": "Este mensaje es demasiado largo para mostrarlo completo: se muestran los primeros {{shown}} MB de {{total}} MB."
 }

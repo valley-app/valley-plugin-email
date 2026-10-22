@@ -1,4 +1,4 @@
-import type { EmailDriver, EmailMessageAction, EmailMessageRef } from './mailTypes'
+import type { EmailDriver, EmailMessageAction, EmailMessageDetail, EmailMessageRef } from './mailTypes'
 import type { EmailSnapshot } from './store'
 import { uiText } from './localization'
 
@@ -15,6 +15,40 @@ interface MessagePorts {
 }
 
 export const messageKey = (message: EmailMessageRef): string => JSON.stringify([message.accountId, message.folder, message.uid])
+
+/**
+ * Characters of body the reader shows. The reader renders and link-scans the whole body on the plugin UI thread, and that
+ * thread must keep answering the host's liveness checks; a longer body is shown up to this length with a note.
+ */
+export const DISPLAY_BODY_CHARACTERS = 512 * 1024
+
+/** Fetch a body that readMessage deferred (too large for one reply, or not downloaded during sync) slice by slice. */
+export async function loadDeferredBody(mail: Pick<EmailDriver, 'loadMessageContent' | 'readMessage'>, message: EmailMessageDetail, cancellation?: AbortSignal): Promise<EmailMessageDetail> {
+  const ref = { accountId: message.accountId, folder: message.folder, uid: message.uid, ...(message.uidValidity === undefined ? {} : { uidValidity: message.uidValidity }) }
+  const body: { text?: string; html?: string } = {}
+  let budget = DISPLAY_BODY_CHARACTERS, shown = 0, available = 0
+  for (const field of ['text', 'html'] as const) {
+    const slices: string[] = []
+    let total = 1
+    for (let offset = 0; offset < total;) {
+      if (budget <= 0) { const result = await mail.loadMessageContent({ ...ref, field, offset }, cancellation); total = result.ok && result.data ? result.data.total : 0; break }
+      const result = await mail.loadMessageContent({ ...ref, field, offset }, cancellation)
+      if (!result.ok || !result.data) throw new Error(result.error || uiText('email.body.loadFailed'))
+      total = result.data.total
+      if (!result.data.chunk.length) break
+      const chunk = result.data.chunk.slice(0, budget)
+      slices.push(chunk)
+      offset += result.data.chunk.length
+      budget -= chunk.length
+      shown += chunk.length
+    }
+    available += Math.max(0, total === 1 && !slices.length ? 0 : total)
+    if (slices.length) body[field] = slices.join('')
+  }
+  const reread = await mail.readMessage(ref, cancellation)
+  const fresh = reread.ok ? reread.data?.message : null
+  return { ...(fresh ?? message), ...body, bodyDeferred: false, bodyError: undefined, ...(shown < available ? { bodyTruncated: { shown, total: available } } : {}) }
+}
 
 export function createMessageController(mail: EmailDriver, ports: MessagePorts) {
   let requestId = 0
@@ -63,8 +97,15 @@ export function createMessageController(mail: EmailDriver, ports: MessagePorts) 
       const result = await mail.readMessage(ref, cancellation.signal)
       if (token !== detailId || !ports.active()) return
       if (!result.ok) throw new Error(result.error || uiText('email.loadFailed'))
-      const message = result.data?.message ?? null
+      let message = result.data?.message ?? null
       if (!message) throw new Error(uiText('email.selectionMissing'))
+      if (message.bodyDeferred) {
+        const retried = Boolean(message.bodyError)
+        ports.set({ selectedMessage: message, selectedUid: message.uid })
+        message = await loadDeferredBody(mail, message, cancellation.signal)
+        if (token !== detailId || !ports.active()) return
+        if (retried) { ++messageRevision; void loadMessages() }
+      }
       ports.set({ selectedMessage: message, selectedUid: message?.uid ?? null, bodyOverride: null, loadingMessage: false })
       ports.updateTitle()
       if (recordHistory) ports.pushHistory()

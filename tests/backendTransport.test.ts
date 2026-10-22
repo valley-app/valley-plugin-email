@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { applyMessageAction, decodeMailbox, encodeMailbox, fetchFolder, listFolders, MailSendError, parseImapResponse, parseMail, sendMail, verifyImap, verifySmtp, type MailTransportApi } from '../src/backend/transport'
+import { appendSentMessage, applyMessageAction, decodeBodyPart, decodeMailbox, encodeMailbox, fetchFolder, listFolders, MailSendError, parseImapResponse, parseMail, sendMail, verifyImap, verifySmtp, type MailTransportApi } from '../src/backend/transport'
 import type { EmailAccount } from '../src/mailTypes'
 import { decodeBytes, encodeBytes } from '../src/backend/encoding'
 
@@ -95,13 +95,15 @@ describe('package-owned IMAP and SMTP', () => {
   })
   it('decodes fragmented literal MIME data and keeps per-folder UIDs and flags', async () => {
     const mime = 'From: "Canopy" <canopy@example.test>\r\nTo: sender@example.test\r\nSubject: =?UTF-8?B?R3LDvHNzZQ==?=\r\nMessage-ID: <first@example.test>\r\nAuto-Submitted: auto-generated\r\nX-Valley-Origin: origin-fixture\r\nDate: Wed, 9 Sep 2026 10:00:00 +0000\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nGrüsse aus dem Wald'
-    const wire = `${login()}* 10 EXISTS\r\nV3 OK selected\r\n* 10 FETCH (UID 72 FLAGS (\\Seen \\Flagged) BODY[] {${new TextEncoder().encode(mime).length}}\r\n${mime})\r\nV4 OK fetched\r\n`
+    const size = new TextEncoder().encode(mime).length
+    const wire = `${login()}* 10 EXISTS\r\nV3 OK selected\r\n* 10 FETCH (UID 72 FLAGS (\\Seen \\Flagged) RFC822.SIZE ${size})\r\nV4 OK listed\r\n* 10 FETCH (UID 72 FLAGS (\\Seen \\Flagged) RFC822.SIZE ${size} BODY[] {${size}}\r\n${mime})\r\nV5 OK fetched\r\n`
     const fixture = transport(wire)
     const { messages } = await fetchFolder(fixture.api, account, 'INBOX', 4)
     expect(messages).toHaveLength(1)
     expect(messages[0]).toMatchObject({ uid: 72, messageId: '<first@example.test>', subject: 'Grüsse', text: 'Grüsse aus dem Wald\n', flags: ['\\Seen', '\\Flagged'] })
     expect(messages[0].automationHeaders).toMatchObject({ observed: true, autoSubmitted: ['auto-generated'], origin: ['origin-fixture'] })
-    expect(fixture.writes.join('')).toContain('FETCH 7:* (UID FLAGS INTERNALDATE BODY.PEEK[])')
+    expect(fixture.writes.join('')).toContain('V4 FETCH 7:* (UID FLAGS INTERNALDATE RFC822.SIZE)')
+    expect(fixture.writes.join('')).toContain('V5 UID FETCH 72 (UID FLAGS INTERNALDATE RFC822.SIZE BODYSTRUCTURE BODY.PEEK[])')
     expect(fixture.api.credentials.write).toHaveBeenCalledWith('socket', ['\0sender@example.test\0', { credential: 'secret-handle' }], { encoding: 'base64', prefix: '', suffix: '\r\n' })
     expect(fixture.writes.join('')).not.toContain('secret-handle')
     expect(fixture.api.network.close).toHaveBeenCalledWith('socket')
@@ -136,7 +138,7 @@ describe('package-owned IMAP and SMTP', () => {
 
   it('moves exactly the requested UID and captures the destination UID', async () => {
     const fixture = transport(`${login()}V3 OK selected\r\n* LIST (\\Trash) "/" "Trash"\r\nV4 OK listed\r\nV5 OK [COPYUID 9 72 105] moved\r\n`)
-    expect(await applyMessageAction(fixture.api, account, 'INBOX', 72, 'trash')).toEqual({ destinationFolder: 'Trash', destinationUid: 105 })
+    expect(await applyMessageAction(fixture.api, account, 'INBOX', 72, 'trash')).toEqual({ destinationFolder: 'Trash', destinationUid: 105, destinationUidValidity: 9 })
     expect(fixture.writes.join('')).toContain('UID MOVE 72 "Trash"')
     expect(fixture.writes.join('')).not.toContain('EXPUNGE')
   })
@@ -223,7 +225,7 @@ describe('package-owned IMAP and SMTP', () => {
 
   it('fetches flags first and downloads bodies only for uncached UIDs', async () => {
     const mime = 'From: moss@example.test\r\nTo: sender@example.test\r\nSubject: Moss\r\nMessage-ID: <moss@example.test>\r\n\r\nMoss body'
-    const flags = '* 2 FETCH (UID 71 FLAGS (\\Seen) INTERNALDATE "09-Sep-2026 10:00:00 +0000")\r\n* 3 FETCH (UID 72 FLAGS () INTERNALDATE "10-Sep-2026 10:00:00 +0000")\r\nV4 OK fetched\r\n'
+    const flags = '* 2 FETCH (UID 71 FLAGS (\\Seen) INTERNALDATE "09-Sep-2026 10:00:00 +0000" RFC822.SIZE 900)\r\n* 3 FETCH (UID 72 FLAGS () INTERNALDATE "10-Sep-2026 10:00:00 +0000" RFC822.SIZE 120)\r\nV4 OK fetched\r\n'
     const fixture = transport(`${login()}* 3 EXISTS\r\n* OK [UIDVALIDITY 9] valid\r\nV3 OK selected\r\n${flags}* 3 FETCH (UID 72 FLAGS () BODY[] {${new TextEncoder().encode(mime).length}}\r\n${mime})\r\nV5 OK fetched\r\n`)
     const stored = { uid: 71, uidValidity: 9, logicalId: 'v1:stored', contentRevision: 'stored', complete: true, messageId: '<fern@example.test>', from: 'fern@example.test', to: 'sender@example.test', subject: 'Fern', date: '', snippet: '', flags: [], hasAttachments: false }
     const cached = vi.fn(async (uids: number[], uidValidity: number | undefined) => new Map(uids.includes(71) && uidValidity === 9 ? [[71, stored]] : []))
@@ -231,8 +233,8 @@ describe('package-owned IMAP and SMTP', () => {
     expect(uidValidity).toBe(9)
     expect(cached).toHaveBeenCalledWith([71, 72], 9)
     const commands = fixture.writes.join('')
-    expect(commands).toContain('V4 FETCH 2:* (UID FLAGS INTERNALDATE)\r\n')
-    expect(commands).toContain('V5 UID FETCH 72 (UID FLAGS INTERNALDATE BODY.PEEK[])\r\n')
+    expect(commands).toContain('V4 FETCH 2:* (UID FLAGS INTERNALDATE RFC822.SIZE)\r\n')
+    expect(commands).toContain('V5 UID FETCH 72 (UID FLAGS INTERNALDATE RFC822.SIZE BODYSTRUCTURE BODY.PEEK[])\r\n')
     expect(commands.match(/BODY\.PEEK/g)).toHaveLength(1)
     expect(messages).toEqual([{ ...stored, flags: ['\\Seen'], receivedAt: '09-Sep-2026 10:00:00 +0000' }, expect.objectContaining({ uid: 72, uidValidity: 9, messageId: '<moss@example.test>', text: expect.stringContaining('Moss body'), receivedAt: undefined })])
   })
@@ -243,5 +245,50 @@ describe('package-owned IMAP and SMTP', () => {
     const { messages } = await fetchFolder(fixture.api, account, 'INBOX', 50, async () => new Map([[71, stored]]))
     expect(fixture.writes.join('')).not.toContain('BODY')
     expect(messages).toEqual([{ ...stored, flags: ['\\Flagged'], receivedAt: '09-Sep-2026 10:00:00 +0000' }])
+  })
+})
+
+describe('large body parts', () => {
+  it('decodes base64, quoted-printable and split UTF-8 the same slice by slice as through the MIME parser', async () => {
+    const value = `${'Grünspecht über der Wiese äöüß – 31 cm. '.repeat(40)}\n`.repeat(400)
+    const bytes = new TextEncoder().encode(value)
+    const base64 = new TextEncoder().encode(encodeBytes(bytes).replace(/.{76}/g, '$&\r\n'))
+    let line = 0
+    const quoted = new TextEncoder().encode([...bytes].map(byte => {
+      if (byte === 10) { line = 0; return '\r\n' }
+      const token = byte >= 33 && byte <= 126 && byte !== 61 ? String.fromCharCode(byte) : `=${byte.toString(16).toUpperCase().padStart(2, '0')}`
+      const soft = line + token.length > 75 ? '=\r\n' : ''
+      line = (soft ? 0 : line) + token.length
+      return soft + token
+    }).join(''))
+    expect(base64.length).toBeGreaterThan(256 * 1024)
+    expect(await decodeBodyPart(base64, { part: '1', kind: 'text', encoding: 'base64', size: base64.length, charset: 'utf-8' })).toBe(value)
+    expect(await decodeBodyPart(quoted, { part: '1', kind: 'html', encoding: 'quoted-printable', size: quoted.length, charset: 'utf-8' })).toBe(value.replace(/\n/g, '\r\n'))
+    expect(await decodeBodyPart(bytes, { part: '1', kind: 'text', encoding: '8bit', size: bytes.length })).toBe(value)
+  })
+})
+
+describe('sent mail in the server Sent folder (F15)', () => {
+  it('appends the accepted MIME to the special-use Sent folder as seen and reads APPENDUID', async () => {
+    const fixture = transport(`${login()}* LIST (\\HasNoChildren) "/" "INBOX"\r\n* LIST (\\HasNoChildren \\Sent) "/" "Gesendet"\r\nV3 OK listed\r\n+ go ahead\r\nV4 OK [APPENDUID 9 12] appended\r\n`, 65536)
+    const mime = new TextEncoder().encode('From: sender@example.test\r\nSubject: Grüsse\r\n\r\n.leading dot stays single\r\n')
+    expect(await appendSentMessage(fixture.api, account, mime)).toEqual({ folder: 'Gesendet', uid: 12, uidValidity: 9 })
+    const wire = fixture.writes.join('')
+    expect(wire).toContain(`V4 APPEND "Gesendet" (\\Seen) {${mime.length}}\r\n`)
+    expect(wire).toContain('\r\n\r\n.leading dot stays single\r\n\r\n')
+    expect(fixture.api.network.close).toHaveBeenCalledOnce()
+  })
+  it('hands the undotted MIME to the caller only after the server accepted the message', async () => {
+    const fixture = transport('220 ready\r\n250 AUTH PLAIN\r\n235 ok\r\n250 sender\r\n250 recipient\r\n354 data\r\n250 queued\r\n', 65536)
+    const accepted = vi.fn()
+    await sendMail(fixture.api, account, { accountId: account.id, to: 'fern@example.test', subject: 'Canopy', text: '.dot line' }, undefined, accepted)
+    expect(accepted).toHaveBeenCalledOnce()
+    const mime = new TextDecoder().decode(accepted.mock.calls[0][0] as Uint8Array)
+    expect(mime).toMatch(/\r\n\.dot line/)
+    expect(fixture.writes.join('')).toMatch(/\r\n\.\.dot line/)
+    const refused = transport('220 ready\r\n250 AUTH PLAIN\r\n235 ok\r\n250 sender\r\n250 recipient\r\n354 data\r\n554 refused\r\n', 65536)
+    const never = vi.fn()
+    await expect(sendMail(refused.api, account, { accountId: account.id, to: 'fern@example.test', subject: 'Canopy', text: 'x' }, undefined, never)).rejects.toThrow('554')
+    expect(never).not.toHaveBeenCalled()
   })
 })

@@ -210,6 +210,7 @@
   "email.backend.archive": "归档",
   "email.backend.junk": "垃圾邮件",
   "email.backend.trash": "已删除",
+  "email.backend.sent": "已发送",
   "email.error.input": "需要邮件选择对象。",
   "email.error.accountIds": "accountIds 必须是账户标识数组。",
   "email.error.view": "不支持的邮箱视图。",
@@ -326,5 +327,17 @@
   "email.settings.connectionChecking": "正在测试…",
   "email.settings.connectionOk": "身份验证成功",
   "email.settings.connectionFailed": "连接失败",
-  "email.backend.cachedFoldersWarning": "正在显示缓存文件夹。实时连接失败：{{error}}"
+  "email.backend.cachedFoldersWarning": "正在显示缓存文件夹。实时连接失败：{{error}}",
+  "email.backend.uidValidityMissing": "邮件服务器未报告该文件夹的 UIDVALIDITY；缓存的文件夹保持不变。",
+  "email.backend.unavailableSubject": "无法下载此邮件",
+  "email.backend.unavailableSnippet": "打开此邮件以重试。",
+  "email.backend.messageMissing": "邮件服务器未返回此邮件。",
+  "email.backend.bodyTooLarge": "此邮件正文过大，无法显示（{{size}} MB）。",
+  "email.attachments": "附件",
+  "email.attachment.save": "保存 {{name}}",
+  "email.attachment.saved": "已保存到 {{path}}",
+  "email.attachment.saveFailed": "无法保存附件。",
+  "email.attachment.tooLarge": "暂时无法在此保存大于 {{size}} MB 的附件。",
+  "email.body.loadFailed": "无法加载邮件正文。",
+  "email.body.truncated": "此邮件过长，无法完整显示：仅显示前 {{shown}} MB（共 {{total}} MB）。"
 }
