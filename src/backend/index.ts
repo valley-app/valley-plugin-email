@@ -59,7 +59,7 @@ const methods = {
   queryMessages: mailMethod(z.object({
     accountId: z.string().min(1), view: z.enum(['recent', 'unread', 'flagged', 'folder']),
     accountIds: z.array(z.string().min(1)).max(100).optional(),
-    filters: z.object({ contact: z.enum(['all', 'known', 'unknown']).optional(), vip: z.enum(['all', 'vip', 'others']).optional(), spam: z.enum(['default', 'spam', 'not-spam', 'all']).optional(), categoryId: z.string().max(200).optional() }).optional(),
+    filters: z.object({ contact: z.enum(['all', 'known', 'unknown']).optional(), vip: z.enum(['all', 'vip', 'others']).optional(), spam: z.enum(['default', 'spam', 'not-spam', 'all']).optional(), categoryId: z.string().max(200).optional(), categoryIds: z.array(z.string().min(1).max(200)).min(1).max(500).optional(), categoryAccountId: z.string().min(1).optional() }).optional(),
     folder: z.string().min(1).optional(), query: z.string().max(1000).optional(),
     limit: z.number().int().min(1).max(200).optional(), cursor: z.string().max(10000).optional()
   }).refine((value) => value.view !== 'folder' || Boolean(value.folder), 'A folder is required.'),

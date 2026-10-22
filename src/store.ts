@@ -5,6 +5,7 @@ import { createContactResolution } from './contactResolution'
 import { createEmailProjections } from './projections'
 import { createClassificationQueue, type ClassificationProgress } from './classificationQueue'
 import { vipAddresses } from './grouping'
+import { createSmartGroupsStore, groupFilter, noGroupFilter, starterGroups, type SmartGroupsStore } from './smartGroups'
 import { createSyncController } from './syncController'
 import { createAccountsController } from './accountsController'
 import { createDraftController } from './draftController'
@@ -74,6 +75,7 @@ export interface EmailStore {
   selectView(view: EmailMailboxView, folder?: string): Promise<void>
   loadMore(): Promise<void>
   openMessage(message: EmailMessageRef | null): void
+  smartGroups: SmartGroupsStore
   sync(): Promise<void>
   /** Sync unless every account of the current folder view was synced within the last minute. */
   syncIfStale(): Promise<void>
@@ -82,6 +84,8 @@ export interface EmailStore {
   dismissError(): void
   setQuery(query: string): void
   setFilters(filters: EmailFilters): void
+  /** Opens a smart group (and its subgroups) of one account in the Recent view; `null` clears the group filter. */
+  selectGroup(accountId: string | null, groupId?: string): Promise<void>
   toggleVip(address: EmailAddress): Promise<void>
   assignCategory(id: string, categoryId: string | null): Promise<void>
   resetCategory(id: string): Promise<void>
@@ -139,7 +143,9 @@ function createStore(api: ValleyPluginApi): EmailStore {
   const listeners = new Set<() => void>()
   const set = (patch: Partial<EmailSnapshot>): void => {
     if (disposed) return
+    const accountsChanged = patch.accounts && patch.accounts.map(account => account.id).join('\u0000') !== state.accounts.map(account => account.id).join('\u0000')
     state = { ...state, ...patch, ...mailboxController.historyState() }
+    if (accountsChanged) void smartGroups.reload().catch(() => {})
     drafts.draft = state.compose
     for (const listener of listeners) listener()
   }
@@ -191,7 +197,9 @@ function createStore(api: ValleyPluginApi): EmailStore {
     sent: (draft) => { if (drafts.draft === draft) drafts.draft = null }
   }, drafts, mail)
   const { startCompose, updateDraft, saveDraft, cancelCompose, closeCompose, revertCompose, send } = draftController
-  const classification = createClassificationQueue(api, classification => set({ classification }), async () => { messagesController.invalidateMessages(); await loadMessages() })
+  let accountsLoaded!: () => void
+  const smartGroups = createSmartGroupsStore(api, () => state.accounts, new Promise<void>(resolve => { accountsLoaded = resolve }), () => starterGroups(key => uiText(key)))
+  const classification = createClassificationQueue(api, smartGroups, classification => set({ classification }), async () => { messagesController.invalidateMessages(); await loadMessages() })
   const projections = createEmailProjections(api, async () => { messagesController.invalidateMessages(); await loadMessages() })
   const offSync = mail.onSync((event) => {
     if (event.status === 'done') syncController.noteSynced(event.accountId, event.folder)
@@ -205,22 +213,31 @@ function createStore(api: ValleyPluginApi): EmailStore {
   })
   const offSettings = api.settings.subscribe(() => set({ bodyOverride: null }))
   const whenReady = Promise.all([refreshAccounts(), draftController.whenReady]).then(() => {})
+  void whenReady.finally(accountsLoaded).catch(() => {})
   return {
     whenReady,
     subscribe: (listener) => { listeners.add(listener); return () => listeners.delete(listener) }, getSnapshot: () => state,
     dispose: () => {
       if (draining) return draining
-      disposed = true; messagesController.invalidateSelection(); contacts.clearSelection(); mailboxController.dispose(); offSync(); offSettings(); listeners.clear()
+      disposed = true; messagesController.invalidateSelection(); contacts.clearSelection(); mailboxController.dispose(); offSync(); offSettings(); smartGroups.dispose(); listeners.clear()
       draining = Promise.allSettled([classification.dispose(), projections.dispose(), contacts.dispose(), syncController.dispose(), draftController.dispose(), mailSession.dispose()]).then((results) => {
         const failure = results.find((result) => result.status === 'rejected')
         if (failure?.status === 'rejected') throw failure.reason
       })
       return draining
     },
-    refreshAccounts, selectAccount, selectAccounts, selectView, selectFolder: (folder) => selectView('folder', folder), loadMore: () => loadMessages(true),
+    smartGroups, refreshAccounts, selectAccount, selectAccounts, selectView, selectFolder: (folder) => selectView('folder', folder), loadMore: () => loadMessages(true),
     openMessage, sync, syncIfStale, act, setPlainText: (message, htmlContent, plainText) => set({ bodyOverride: { key: messageKey(message), htmlContent, plainText } }), dismissError: () => set({ error: null }),
     setQuery,
     setFilters: filters => { messagesController.invalidateMessages(); set({ filters, messages: [], cursor: undefined }); void api.settings.set('filters', filters).catch(report); void loadMessages() },
+    selectGroup: async (accountId, groupId) => {
+      if (!(accountId && groupId) && !state.filters.categoryAccountId) return
+      const filters = { ...state.filters, ...(accountId && groupId ? groupFilter(smartGroups.get(), accountId, groupId) : noGroupFilter) }
+      messagesController.invalidateMessages()
+      set({ filters })
+      void api.settings.set('filters', filters).catch(report)
+      if (accountId && groupId) await selectView('recent')
+    },
     toggleVip: async address => {
       const values = vipAddresses(api), key = address.address.trim().toLowerCase()
       const matched = state.contacts[key]
