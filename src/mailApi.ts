@@ -8,9 +8,13 @@ export function mailApi(api: { backend: Pick<ValleyPluginApi['backend'], 'call' 
       const payload = Object.fromEntries(Object.entries({ ...input, filters: input.filters ? Object.fromEntries(Object.entries(input.filters).filter(([, value]) => value !== undefined)) : undefined }).filter(([, value]) => value !== undefined))
       return api.backend.callOperation ? api.backend.callOperation('queryMessages', payload, { cancellation }) : call('queryMessages', payload)
     },
-    readMessage: (input, cancellation) => {
+    // A cached read answers at once: an operation would only report it at its next status poll.
+    readMessage: async (input, cancellation) => {
+      cancellation?.throwIfAborted()
       const payload = { accountId: input.accountId, folder: input.folder, uid: input.uid, ...(input.uidValidity === undefined ? {} : { uidValidity: input.uidValidity }) }
-      return api.backend.callOperation ? api.backend.callOperation('readMessage', payload, { cancellation }) : call('readMessage', payload)
+      const result = await call<Awaited<ReturnType<EmailDriver['readMessage']>>>('readMessage', payload)
+      cancellation?.throwIfAborted()
+      return result
     },
     parseAddresses: (value) => call('parseAddresses', { value }),
     listAccounts: () => call('listAccounts', {}),

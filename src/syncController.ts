@@ -15,7 +15,12 @@ interface SyncPorts {
   report(error: unknown): void
 }
 
+/** A folder synced this recently (by this view or by the backend's own poll) is not synced again just because a view opened. */
+export const FRESH_SYNC_MS = 60_000
+const freshKey = (accountId: string, folder: string): string => JSON.stringify([accountId, folder])
+
 export function createSyncController(api: ValleyPluginApi, ports: SyncPorts, mail = mailApi(api)) {
+  const synced = new Map<string, number>()
   let active = true
   let again = false
   let pending: Promise<void> | undefined
@@ -43,6 +48,7 @@ export function createSyncController(api: ValleyPluginApi, ports: SyncPorts, mai
             try {
               const result = await mail.syncFolder(accountId, folder, Math.min(500, Number(api.settings.get().syncLimit) || 50))
               if (!result.ok) throw new Error(result.error || uiText('email.syncFailed'))
+              synced.set(freshKey(accountId, folder), Date.now())
             } catch (error) {
               errors.push(`${ports.accountLabel(accountId)}: ${error instanceof Error ? error.message : String(error)}`)
             }
@@ -69,8 +75,16 @@ export function createSyncController(api: ValleyPluginApi, ports: SyncPorts, mai
     })
     return pending
   }
+  const syncIfStale = (now = Date.now()): Promise<void> => {
+    const scope = ports.scope()
+    const fresh = scope.view === 'folder' && scope.accountIds.length > 0
+      && scope.accountIds.every((accountId) => now - (synced.get(freshKey(accountId, scope.folder)) ?? Number.NEGATIVE_INFINITY) < FRESH_SYNC_MS)
+    return fresh ? pending ?? Promise.resolve() : sync()
+  }
   return {
     sync,
+    syncIfStale,
+    noteSynced(accountId: string, folder: string, at = Date.now()): void { synced.set(freshKey(accountId, folder), at) },
     recordRefresh(key: string, promise: Promise<void>): void { if (active && pending) latestRefresh = { key, promise } },
     dispose(): Promise<void> {
       if (draining) return draining

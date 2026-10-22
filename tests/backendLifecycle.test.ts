@@ -264,6 +264,28 @@ describe('backend account work ownership', () => {
     await host.dispose()
   })
 
+  it('answers cached reads while the same account waits on its server', async () => {
+    const host = await fixture(['a'], undefined, undefined, undefined, true)
+    await mergeFolder(host.scope, 'a', 'INBOX', [message])
+    const remote = deferred()
+    const fetch = vi.spyOn(transport, 'fetchFolder').mockImplementation(async () => { await remote.promise; return { messages: [message], uidValidity: 1 } })
+    const folders = vi.spyOn(transport, 'listFolders').mockImplementation(async () => { await remote.promise; return [] })
+    const syncing = host.call('syncFolder', { accountId: 'a' })
+    await vi.waitFor(() => expect(fetch).toHaveBeenCalledOnce())
+    const listing = host.call('listFolders', { accountId: 'a' })
+    const within = <T,>(promise: Promise<T>): Promise<T> => Promise.race([promise, new Promise<T>((_, reject) => setTimeout(() => reject(new Error('waited for the server')), 1000))])
+    const query = host.operations.get('queryMessages')!
+    expect(await within(Promise.resolve(query({ accountId: 'a', view: 'recent' }, { id: 'query', cancellation: new AbortController().signal, api: host.api } as unknown as PluginBackendOperationContext))))
+      .toMatchObject({ ok: true, data: { messages: [expect.objectContaining({ subject: 'Survey' })] } })
+    expect(host.operations.has('readMessage')).toBe(false)
+    expect(await within(host.call('readMessage', { accountId: 'a', folder: 'INBOX', uid: 1 }))).toMatchObject({ ok: true, data: { message: { subject: 'Survey' } } })
+    remote.resolve()
+    expect(await syncing).toMatchObject({ ok: true })
+    expect(await listing).toMatchObject({ ok: true })
+    expect(folders).toHaveBeenCalledOnce()
+    await host.dispose()
+  })
+
   it('preserves complete multi-account selection and orders overlapping queries before removal', async () => {
     const ids = Array.from({ length: 65 }, (_, index) => `account-${index}`)
     const host = await fixture(ids)

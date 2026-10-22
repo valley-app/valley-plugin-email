@@ -156,7 +156,7 @@ export const Panel: React.FC = () => {
   const { dateFormat, timeFormat } = useEmailDateFormat()
   const account = snap.accounts.find((candidate) => candidate.id === snap.selectedAccountId)
   const accountSelection = JSON.stringify(snap.selectedAccountIds.length ? snap.selectedAccountIds : snap.accounts.map((candidate) => candidate.id))
-  React.useEffect(() => { void store.sync() }, [store, accountSelection, snap.view, snap.selectedFolder])
+  React.useEffect(() => { void store.syncIfStale() }, [store, accountSelection, snap.view, snap.selectedFolder])
   return <div className="email-panel">
     <div className="panel-header"><span className="panel-title">{uiText('auto.84add5b29527')}</span></div>
     {!snap.loading && <div className="email-panel-toolbar">

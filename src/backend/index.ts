@@ -50,6 +50,10 @@ function mailMethod<Schema extends z.ZodTypeAny, Result>(schema: Schema, run: (s
   return { schema, run: (scope: MailBackendContext, payload: unknown) => run(scope, schema.parse(payload)) }
 }
 
+// Cached reads wait only for work that deletes or replaces cached mail, never behind an account's network work (sync, folders, send).
+const CACHED_READS = new Set(['queryMessages', 'readMessage'])
+const CACHE_REPLACING = new Set(['removeAccount', 'restoreAccount', 'restoreSyncState', 'forgetCachedMessage'])
+
 const methods = {
   queryMessages: mailMethod(z.object({
     accountId: z.string().min(1), view: z.enum(['recent', 'unread', 'flagged', 'folder']),
@@ -376,7 +380,7 @@ export function register(api: MailBackendApi): () => Promise<void> {
       const accountIds = input && 'accountIds' in input && Array.isArray(input.accountIds) && input.accountIds.length
         ? input.accountIds.filter((id): id is string => typeof id === 'string')
         : input && 'accountId' in input && typeof input.accountId === 'string' ? [input.accountId] : []
-      const keys = [...new Set(accountIds)].map(id => `account:${id}`)
+      const keys = [...new Set(accountIds)].flatMap(id => CACHED_READS.has(name) ? [`cache:${id}`] : CACHE_REPLACING.has(name) ? [`account:${id}`, `cache:${id}`] : [`account:${id}`])
       if (name === 'restoreAccount' && input && 'restore' in input) keys.push(`account:${String((input.restore as { account: { id: unknown } }).account.id)}`)
       if (name === 'addSmtpAccount' || name === 'updateSmtpAccount' || name === 'removeAccount' || name === 'restoreAccount' || name === 'listAccounts') keys.push('account-registry')
       const bytes = new TextEncoder().encode(JSON.stringify(input ?? null)).length
@@ -393,8 +397,8 @@ export function register(api: MailBackendApi): () => Promise<void> {
     }
   }
     const operation = workflow ? workflow.operation(`command.${name}`, handler) : api.rpc.handleOperation?.(`command.${name}`, handler)
-    const existingOperation = ['queryMessages', 'readMessage'].includes(name) ? api.rpc.handleOperation?.(name, handler) : undefined
-    const rpc = ['queryMessages', 'readMessage'].includes(name) && operation ? undefined : api.rpc.handle(name, handler)
+    const existingOperation = name === 'queryMessages' ? api.rpc.handleOperation?.(name, handler) : undefined
+    const rpc = name === 'queryMessages' && operation ? undefined : api.rpc.handle(name, handler)
     return () => { operation?.(); existingOperation?.(); rpc?.() }
   })
   off.push(api.rpc.handle('notifications.action', async payload => {

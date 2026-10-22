@@ -132,7 +132,7 @@ describe('Email mailbox', () => {
     expect(folders.mock.calls).toEqual([['one'], ['two']])
     expect(store.getSnapshot().mailboxesByAccount).toHaveProperty('two')
     folders.mockResolvedValueOnce({ ok: false, error: 'Offline' })
-    await expect(store.restoreSelection({ accountIds: ['one'], view: 'folder', folder: 'INBOX' })).rejects.toThrow('Could not load the saved mailbox')
+    await expect(store.restoreSelection({ accountIds: ['one'], view: 'folder', folder: 'Projects' })).rejects.toThrow('Could not load the saved mailbox')
     expect(store.getSnapshot()).toMatchObject({ selectedAccountIds: ['one', 'two'], selectedFolder: 'Archive' })
   })
 
@@ -938,22 +938,24 @@ describe('Email mailbox', () => {
 })
 
 
-it('cancels superseded reader operations and retains the latest message', async () => {
+it('reads a cached message with one direct request and drops a superseded read', async () => {
   const mock = setup()
   const store = getStore()
   await store.whenReady
   const operations = vi.spyOn(mock.api.backend, 'callOperation')
+  const calls = vi.spyOn(mock.api.backend, 'call')
   let release!: () => void
   const held = new Promise<void>(resolve => { release = resolve })
   const original = mock.mail.readMessage
   mock.mail.readMessage = async input => { if (input.uid === message.uid) await held; return original(input) }
   store.openMessage(message)
-  await waitFor(() => expect(operations).toHaveBeenCalled())
-  const cancellation = operations.mock.calls.at(-1)![2]!.cancellation!
+  await waitFor(() => expect(calls).toHaveBeenCalledWith('readMessage', expect.objectContaining({ uid: message.uid })))
+  expect(operations.mock.calls.filter(([method]) => method === 'readMessage')).toEqual([])
   store.openMessage(null)
-  expect(cancellation.aborted).toBe(true)
   release()
-  await waitFor(() => expect(store.getSnapshot().selectedMessage).toBeNull())
+  await held
+  await new Promise(resolve => setTimeout(resolve, 0))
+  expect(store.getSnapshot()).toMatchObject({ selectedMessage: null, selectedUid: null })
 })
 
 it('closes an email:compose draft through the public close-compose inverse without discarding edits', async () => {
@@ -1073,4 +1075,49 @@ it('undoes an update-properties flag edit exactly through its registered revert'
   flags = []
   await expect(mock.busUndo[0].undo()).rejects.toMatchObject({ code: 'REVISION_CONFLICT', outcome: 'not-applied' })
   expect(vi.mocked(mock.mail.applyMessageAction)).toHaveBeenCalledTimes(4)
+})
+
+it('opens a cached Inbox message while the server folder list is still loading', async () => {
+  let release!: () => void
+  const held = new Promise<void>((resolve) => { release = resolve })
+  const mock = setup(Promise.resolve(), {}, (mock) => {
+    mock.mail.listFolders = vi.fn(async () => { await held; return { ok: true, data: { folders: ['INBOX'], mailboxes: [] } } })
+  })
+  const within = <T,>(promise: Promise<T>): Promise<T> => Promise.race([promise, new Promise<T>((_, reject) => setTimeout(() => reject(new Error('waited for the server folder list')), 1000))])
+  const store = getStore()
+  await within(store.whenReady)
+  expect(await within(store.restoreSelection({ accountIds: ['one'], view: 'folder', folder: 'INBOX', message: { accountId: 'one', folder: 'INBOX', uid: 7 } }))).toBe(true)
+  expect(store.getSnapshot()).toMatchObject({ selectedUid: 7, selectedMessage: { id: 'canopy' }, loadingMessage: false })
+  expect(mock.mail.listFolders).toHaveBeenCalled()
+  release()
+})
+
+it('syncs a folder on open only when it was not synced within the last minute', async () => {
+  let onSync!: Parameters<ReturnType<typeof createMockValleyApi>['mail']['onSync']>[0]
+  const mock = setup(Promise.resolve(), {}, (mock) => {
+    mock.mail.onSync = (listener) => { onSync = listener; return () => {} }
+    mock.mail.syncFolder = vi.fn(async () => ({ ok: true }))
+  })
+  const store = getStore()
+  await store.whenReady
+  let now = 1_000_000
+  const clock = vi.spyOn(Date, 'now').mockImplementation(() => now)
+  try {
+    await store.syncIfStale()
+    const perPass = vi.mocked(mock.mail.syncFolder).mock.calls.length
+    expect(perPass).toBe(2)
+    now += 30_000
+    await store.syncIfStale()
+    expect(mock.mail.syncFolder).toHaveBeenCalledTimes(perPass)
+    await store.sync()
+    expect(mock.mail.syncFolder).toHaveBeenCalledTimes(2 * perPass)
+    now += 61_000
+    await store.syncIfStale()
+    expect(mock.mail.syncFolder).toHaveBeenCalledTimes(3 * perPass)
+    now += 61_000
+    onSync({ accountId: 'one', folder: 'INBOX', status: 'done', fetched: 0, total: 1 })
+    onSync({ accountId: 'two', folder: 'INBOX', status: 'done', fetched: 0, total: 0 })
+    await store.syncIfStale()
+    expect(mock.mail.syncFolder).toHaveBeenCalledTimes(3 * perPass)
+  } finally { clock.mockRestore() }
 })

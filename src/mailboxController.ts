@@ -85,7 +85,9 @@ export function createMailboxController(mail: EmailDriver, ports: MailboxPorts) 
       message = result.data.message
     }
     let folders: Awaited<ReturnType<typeof ports.accounts.readFolders>> | undefined
-    if (selection.view === 'folder') {
+    const knownFolder = (accountId: string): boolean => selection.folder.toUpperCase() === 'INBOX'
+      || (ports.snapshot().mailboxesByAccount[accountId] ?? []).some((mailbox) => mailbox.path === selection.folder && mailbox.selectable)
+    if (selection.view === 'folder' && !requested.every(knownFolder)) {
       folders = await ports.accounts.readFolders(requested)
       if (folders.some(({ result }) => !result.ok)) throw new Error(uiText('email.error.loadMailbox'))
       if (!folders.some(({ result }) => result.data?.folders.includes(selection.folder) || result.data?.mailboxes.some((mailbox) => mailbox.path === selection.folder && mailbox.selectable))) throw new Error(uiText('email.error.folderMissing'))
@@ -94,7 +96,11 @@ export function createMailboxController(mail: EmailDriver, ports: MailboxPorts) 
     clearTimeout(queryTimer)
     ports.set({ selectedAccountIds: selection.accountIds, selectedAccountId: requested[0], view: selection.view, selectedFolder: selection.folder, query: selection.query ?? '',
       selectedMessage: message, selectedUid: message?.uid ?? null, bodyOverride: null, loadingMessage: false, composing: false, messages: [], cursor: undefined, error: null })
-    await Promise.all([ports.messages.loadMessages(), ports.accounts.refreshFolders(requested, folders)])
+    const loaded = ports.messages.loadMessages()
+    const refreshed = ports.accounts.refreshFolders(requested, folders)
+    await loaded
+    if (folders) await refreshed
+    else void refreshed
     if (generation !== ports.messages.selectionVersion() || !ports.active()) return false
     ports.updateTitle()
     if (recordHistory) pushHistory()

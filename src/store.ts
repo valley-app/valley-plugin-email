@@ -74,6 +74,8 @@ export interface EmailStore {
   loadMore(): Promise<void>
   openMessage(message: EmailMessageRef | null): void
   sync(): Promise<void>
+  /** Sync unless every account of the current folder view was synced within the last minute. */
+  syncIfStale(): Promise<void>
   act(message: EmailMessageRef, action: EmailMessageAction): Promise<boolean>
   setPlainText(message: EmailMessageRef, htmlContent: boolean, plainText: boolean): void
   dismissError(): void
@@ -181,6 +183,7 @@ function createStore(api: ValleyPluginApi): EmailStore {
     report
   }, mail)
   const sync = syncController.sync
+  const syncIfStale = (): Promise<void> => syncController.syncIfStale()
   const draftController = createDraftController(api, {
     snapshot: () => state, active: () => !disposed, set, report, updateTitle, resolveContacts,
     invalidateMessages: () => { messagesController.invalidateMessages() }, refreshMessages: () => loadMessages(),
@@ -190,6 +193,7 @@ function createStore(api: ValleyPluginApi): EmailStore {
   const classification = createClassificationQueue(api, classification => set({ classification }), async () => { messagesController.invalidateMessages(); await loadMessages() })
   const projections = createEmailProjections(api, async () => { messagesController.invalidateMessages(); await loadMessages() })
   const offSync = mail.onSync((event) => {
+    if (event.status === 'done') syncController.noteSynced(event.accountId, event.folder)
     if (event.status === 'done' && event.arrived?.length) void classification.enqueue(event.arrived, true).catch(report)
     if (activeAccountIds().includes(event.accountId) && event.status === 'done') {
       messagesController.invalidateMessages()
@@ -213,7 +217,7 @@ function createStore(api: ValleyPluginApi): EmailStore {
       return draining
     },
     refreshAccounts, selectAccount, selectAccounts, selectView, selectFolder: (folder) => selectView('folder', folder), loadMore: () => loadMessages(true),
-    openMessage, sync, act, setPlainText: (message, htmlContent, plainText) => set({ bodyOverride: { key: messageKey(message), htmlContent, plainText } }), dismissError: () => set({ error: null }),
+    openMessage, sync, syncIfStale, act, setPlainText: (message, htmlContent, plainText) => set({ bodyOverride: { key: messageKey(message), htmlContent, plainText } }), dismissError: () => set({ error: null }),
     setQuery,
     setFilters: filters => { messagesController.invalidateMessages(); set({ filters, messages: [], cursor: undefined }); void api.settings.set('filters', filters).catch(report); void loadMessages() },
     toggleVip: async address => {

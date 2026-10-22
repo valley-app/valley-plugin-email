@@ -69,7 +69,8 @@ export function createAccountsController(api: ValleyPluginApi, ports: AccountPor
         ports.set({ selectedMessage: null, selectedUid: null, loadingMessage: false, messages: [], contacts: {} })
       }
       ports.set({ loading: false, accounts, selectedAccountId, selectedAccountIds })
-      if (selectedAccountId) await Promise.all([ports.refreshMessages(), refreshFolders()])
+      // The cached list is enough to be ready; folder names and counts refresh from the server in the background.
+      if (selectedAccountId) { const messages = ports.refreshMessages(); void refreshFolders(); await messages }
       else ports.set({ messages: [], selectedMessage: null, selectedUid: null, mailboxes: [], mailboxesByAccount: {}, folders: [] })
       ports.initialHistory()
     } catch (error) { if (generation === accountRequest) { ports.set({ loading: false }); ports.report(error) } }
