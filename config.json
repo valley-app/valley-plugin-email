@@ -93,7 +93,7 @@
     {
       "id": "messages",
       "store": "cache",
-      "version": 5,
+      "version": 6,
       "title": "Messages",
       "primaryKey": [
         "id"
@@ -179,6 +179,10 @@
           "default": false
         },
         "automationHeaders": {
+          "type": "json",
+          "nullable": true
+        },
+        "structure": {
           "type": "json",
           "nullable": true
         }
@@ -2929,6 +2933,44 @@
                             "origin"
                           ],
                           "additionalProperties": false
+                        },
+                        "attachments": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "index": {
+                                "type": "integer",
+                                "minimum": 0
+                              },
+                              "filename": {
+                                "type": "string"
+                              },
+                              "mimeType": {
+                                "type": "string"
+                              },
+                              "size": {
+                                "type": "integer",
+                                "minimum": 0
+                              },
+                              "inline": {
+                                "type": "boolean"
+                              }
+                            },
+                            "required": [
+                              "index",
+                              "filename",
+                              "mimeType",
+                              "size"
+                            ],
+                            "additionalProperties": false
+                          }
+                        },
+                        "bodyDeferred": {
+                          "type": "boolean"
+                        },
+                        "bodyError": {
+                          "type": "string"
                         }
                       },
                       "required": [
@@ -7668,6 +7710,23 @@
               "folder",
               "projectionVersion"
             ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "messages-structure-v6",
+      "store": "cache",
+      "fromVersion": 5,
+      "toVersion": 6,
+      "steps": [
+        {
+          "operation": "add-column",
+          "dataset": "messages",
+          "column": "structure",
+          "definition": {
+            "type": "json",
+            "nullable": true
           }
         }
       ]

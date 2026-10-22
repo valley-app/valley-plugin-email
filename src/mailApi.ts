@@ -16,6 +16,13 @@ export function mailApi(api: { backend: Pick<ValleyPluginApi['backend'], 'call' 
       cancellation?.throwIfAborted()
       return result
     },
+    loadMessageContent: async (input, cancellation) => {
+      cancellation?.throwIfAborted()
+      const result = await call<Awaited<ReturnType<EmailDriver['loadMessageContent']>>>('loadMessageContent', { accountId: input.accountId, folder: input.folder, uid: input.uid, ...(input.uidValidity === undefined ? {} : { uidValidity: input.uidValidity }), field: input.field, offset: input.offset })
+      cancellation?.throwIfAborted()
+      return result
+    },
+    readAttachment: (input) => call('readAttachment', { accountId: input.accountId, folder: input.folder, uid: input.uid, ...(input.uidValidity === undefined ? {} : { uidValidity: input.uidValidity }), index: input.index, offset: input.offset }),
     parseAddresses: (value) => call('parseAddresses', { value }),
     listAccounts: () => call('listAccounts', {}),
     addSmtpAccount: (input) => call('addSmtpAccount', input),

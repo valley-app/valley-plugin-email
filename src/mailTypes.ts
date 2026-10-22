@@ -46,6 +46,49 @@ export interface CachedMessage {
   html?: string
   flags: string[]
   hasAttachments: boolean
+  /** Size, attachment parts, text bodies not downloaded yet, and a download failure, as recorded by sync. */
+  structure?: MailStructure
+}
+
+/** One attachment of a cached message, located by its IMAP part number; its bytes are fetched only when saved. */
+export interface MailAttachmentPart {
+  part: string
+  filename: string
+  mimeType: string
+  encoding: string
+  /** Bytes of the part as stored on the server (before transfer decoding). */
+  encodedSize: number
+  /** Approximate decoded size. */
+  size: number
+  inline?: boolean
+  contentId?: string
+}
+
+/** One text or HTML body part. */
+export interface MailBodyPart {
+  part: string
+  kind: 'text' | 'html'
+  encoding: string
+  size: number
+  charset?: string
+}
+
+export interface MailStructure {
+  size?: number
+  attachments?: MailAttachmentPart[]
+  /** Body parts above the sync limit, downloaded when the message is opened. */
+  deferred?: MailBodyPart[]
+  /** Why the message could not be downloaded; it is kept once and retried only when opened. */
+  failure?: string
+}
+
+/** An attachment as the reader lists it. */
+export interface EmailAttachment {
+  index: number
+  filename: string
+  mimeType: string
+  size: number
+  inline?: boolean
 }
 
 export interface MailAutomationHeaders {
@@ -78,6 +121,10 @@ export interface EmailSyncEvent {
   arrived?: string[]
   fetched?: number
   total?: number
+  /** Messages that could not be downloaded in this sync and were kept as unavailable. */
+  unavailable?: number
+  /** Cached messages removed because the server no longer has them. */
+  removed?: number
   error?: string
 }
 
@@ -108,7 +155,7 @@ export interface EmailMessageRef {
 
 export type EmailMailboxView = 'recent' | 'unread' | 'flagged' | 'folder'
 
-export interface EmailMessageSummary extends Omit<CachedMessage, 'text' | 'html'>, EmailMessageRef {
+export interface EmailMessageSummary extends Omit<CachedMessage, 'text' | 'html' | 'structure'>, EmailMessageRef {
   id: string
   categoryId?: string
   isVip?: boolean
@@ -121,7 +168,19 @@ export interface EmailMessageSummary extends Omit<CachedMessage, 'text' | 'html'
 export interface EmailMessageDetail extends EmailMessageSummary {
   text?: string
   html?: string
+  attachments?: EmailAttachment[]
+  /** The body is not in this reply: it is too large to return at once or was not downloaded yet. Load it with `loadMessageContent`. */
+  bodyDeferred?: boolean
+  /** The recorded reason the message could not be downloaded. */
+  bodyError?: string
+  /** Characters of the body the reader shows, when it is too long to show completely. */
+  bodyTruncated?: { shown: number; total: number }
 }
+
+export interface EmailBodyChunk { field: 'text' | 'html'; offset: number; total: number; chunk: string }
+export interface EmailBodyChunkResult extends DriverResult { data?: EmailBodyChunk }
+export interface EmailAttachmentSlice { filename: string; mimeType: string; encoding: string; encodedSize: number; offset: number; data: string }
+export interface EmailAttachmentSliceResult extends DriverResult { data?: EmailAttachmentSlice }
 
 export interface EmailFilters {
   contact?: 'all' | 'known' | 'unknown'
@@ -223,6 +282,10 @@ export interface EmailDriver {
   sendEmail(input: EmailSendInput): Promise<DriverResult & { outcome?: 'remote-complete' | 'not-applied' | 'unknown'; data?: { messageId: string } }>
   /** Mutate one message on the server and mirror the successful result into the local cache. */
   applyMessageAction(input: EmailMessageActionInput): Promise<EmailMessageActionResult>
+  /** Download a body that is deferred or too large for one reply (once), then return one slice of it. */
+  loadMessageContent(input: EmailMessageRef & { field: 'text' | 'html'; offset: number }, cancellation?: AbortSignal): Promise<EmailBodyChunkResult>
+  /** One base64 slice of an attachment's encoded bytes, fetched from the server on demand. */
+  readAttachment(input: EmailMessageRef & { index: number; offset: number }): Promise<EmailAttachmentSliceResult>
   /** Subscribe to IMAP sync progress events. Returns an unsubscribe fn. */
   onSync(cb: (event: EmailSyncEvent) => void): () => void
 }

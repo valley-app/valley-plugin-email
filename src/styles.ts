@@ -126,6 +126,15 @@ const CSS = `
 .email-reader-context { grid-column:1 / -1; display:flex; align-items:center; justify-content:flex-end; min-width:0; border-top:1px solid var(--border-light); padding-top:12px; color:var(--text-secondary); font-size:.75rem; }
 .email-reader-date { display:block; margin:0; white-space:nowrap; color:var(--text-secondary); font-size:.75rem; font-variant-numeric:tabular-nums; }
 .email-reader-body { flex:0 0 auto; min-width:0; width:100%; box-sizing:border-box; max-width:820px; margin:20px auto 0; padding:0 20px 20px; font:400 .9375rem/1.7 var(--body-font); color:var(--text-color); white-space:pre-wrap; overflow-wrap:anywhere; }
+.email-attachments { display:flex; flex-wrap:wrap; align-items:center; gap:6px; box-sizing:border-box; width:100%; max-width:820px; margin:16px auto 0; padding:0 20px; font-size:.75rem; color:var(--text-secondary); white-space:normal; }
+.email-preview .email-attachments { margin:12px 0 0; padding:0; }
+.email-attachment { display:inline-flex; align-items:center; gap:6px; max-width:100%; min-width:0; height:28px; padding:0 10px; border:1px solid var(--border-light); border-radius:5px; background:none; color:var(--text-color); font:inherit; cursor:pointer; }
+.email-attachment:hover:not(:disabled) { background:var(--hover-bg); }
+.email-attachment:disabled { cursor:default; color:var(--text-tertiary); }
+.email-attachment svg { flex:0 0 auto; width:14px; height:14px; }
+.email-attachment-name { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.email-attachment small { flex:0 0 auto; color:var(--text-secondary); }
+.email-attachment-status { flex-basis:100%; overflow-wrap:anywhere; }
 .email-body-options { display:flex; flex-wrap:wrap; align-items:center; gap:10px; margin-bottom:12px; white-space:normal; font-size:.71875rem; color:var(--text-secondary); }
 .email-message-loading { display:flex; align-items:center; justify-content:center; min-height:180px; height:100%; }
 .email-person { display:inline-flex; flex-wrap:wrap; gap:3px 6px; align-items:baseline; font:inherit; color:inherit; max-width:100%; overflow-wrap:anywhere; }

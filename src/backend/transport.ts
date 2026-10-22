@@ -1,8 +1,8 @@
 import { t } from './localization'
-import PostalMime, { type Address } from 'postal-mime'
+import PostalMime, { decodeWords, type Address, type Email } from 'postal-mime'
 import { createMimeMessage } from 'mimetext/browser'
 import type { PluginNetworkApi, PluginCredentialApi, PluginAccountApi, PluginSocketEndpoint, PluginCredentialStore } from '@valley/plugin-sdk/pluginNetwork'
-import type { CachedMessage, EmailAccount, EmailMailbox, EmailMessageAction, EmailSendInput } from '../mailTypes'
+import type { CachedMessage, EmailAccount, EmailMailbox, EmailMessageAction, EmailSendInput, MailAttachmentPart, MailBodyPart, MailStructure } from '../mailTypes'
 import { decodeBytes, encodeBytes } from './encoding'
 import { parseEmailAddresses } from './query'
 import { digest } from './identity'
@@ -17,6 +17,21 @@ export interface MailTransportApi {
 const encoder = new TextEncoder()
 const decoder = new TextDecoder()
 const MAX_MESSAGE_BYTES = 64 * 1024 * 1024
+/** Per-message memory bounds for sync; the guest heap is 128 MiB and every large string also crosses the host boundary as JSON. */
+export const MAIL_SYNC_LIMITS = {
+  /** Messages up to this RFC822.SIZE are downloaded whole; larger ones as headers, structure and text bodies. */
+  wholeMessageBytes: 1024 * 1024,
+  /** Bytes of whole messages requested by one FETCH; each batch is parsed and stored before the next. */
+  batchBytes: 4 * 1024 * 1024,
+  batchMessages: 25,
+  /** Text and HTML body parts are downloaded during sync while their sizes add up to this; the rest when the message is opened. */
+  bodyBytes: 1024 * 1024,
+  headerBytes: 64 * 1024,
+  /** Largest single body part fetched on demand. */
+  openPartBytes: 16 * 1024 * 1024,
+  /** Largest slice of an attachment returned by one request. */
+  attachmentSliceBytes: 3 * 1024 * 1024
+} as const
 const yieldTurn = (delay = 0): Promise<void> => new Promise(resolve => setTimeout(resolve, delay))
 let mimeSchedulingInstalled = false
 
@@ -47,6 +62,9 @@ export class MailSendError extends Error {
   constructor(message: string, readonly outcome: 'not-applied' | 'unknown') { super(message) }
 }
 
+/** A tagged NO or BAD reply: the server refused one command and the connection stays usable. */
+export class ImapRefusal extends Error {}
+
 export function accountEndpoint(account: EmailAccount, kind: 'imap' | 'smtp'): PluginSocketEndpoint {
   const endpoint = account[kind]
   return { host: endpoint.host, port: endpoint.port, security: endpoint.secure ? 'tls' : 'starttls' }
@@ -57,27 +75,54 @@ export function credentialName(accountId: string): string { return accountId }
 const credentialSource = (account: EmailAccount) => ({ store: MAIL_CREDENTIAL_STORE, endpoints: [accountEndpoint(account, 'imap'), accountEndpoint(account, 'smtp')] })
 
 class Connection {
-  private buffer = new Uint8Array()
+  // Received data stays in the chunks it arrived in; a read copies each byte once into a result of exactly the requested size.
+  private chunks: Uint8Array[] = []
+  private offset = 0
+  private available = 0
   private emptyReads = 0
   constructor(readonly api: MailTransportApi, readonly id: string) {}
   async write(value: string): Promise<void> { await this.api.network.write(this.id, encodeBytes(encoder.encode(value))) }
   async close(): Promise<void> { await this.api.network.close(this.id).catch(() => undefined) }
-  async bytes(length: number): Promise<Uint8Array> {
-    if (length > MAX_MESSAGE_BYTES) throw new Error(t('email.backend.messageLimit'))
-    while (this.buffer.length < length) await this.more()
-    const value = this.buffer.slice(0, length)
-    this.buffer = this.buffer.slice(length)
+  /** Read `length` bytes; with `keep` false they are drained without being retained. */
+  async bytes(length: number, keep = true): Promise<Uint8Array> {
+    if (keep && length > MAX_MESSAGE_BYTES) throw new Error(t('email.backend.messageLimit'))
+    const value = new Uint8Array(keep ? length : 0)
+    let filled = 0
+    while (filled < length) {
+      if (!this.available) await this.more()
+      const chunk = this.chunks[0]
+      const take = Math.min(length - filled, chunk.length - this.offset)
+      if (keep) value.set(chunk.subarray(this.offset, this.offset + take), filled)
+      filled += take
+      this.consume(take)
+    }
     return value
   }
   async line(): Promise<string> {
-    let end: number
-    while ((end = this.buffer.indexOf(10)) < 0) {
-      if (this.buffer.length > 1024 * 1024) throw new Error(t('email.backend.lineLimit'))
+    let scanned = 0
+    for (;;) {
+      let position = 0
+      for (let index = 0; index < this.chunks.length; index++) {
+        const chunk = this.chunks[index], from = index ? 0 : this.offset, size = chunk.length - from
+        if (position + size > scanned) {
+          const end = chunk.indexOf(10, from + Math.max(0, scanned - position))
+          if (end >= 0) {
+            const value = decoder.decode(await this.bytes(position + end - from)).replace(/\r$/, '')
+            this.consume(1)
+            return value
+          }
+        }
+        position += size
+      }
+      scanned = position
+      if (scanned > 1024 * 1024) throw new Error(t('email.backend.lineLimit'))
       await this.more()
     }
-    const value = decoder.decode(this.buffer.slice(0, end)).replace(/\r$/, '')
-    this.buffer = this.buffer.slice(end + 1)
-    return value
+  }
+  private consume(length: number): void {
+    this.offset += length
+    this.available -= length
+    while (this.chunks.length && this.offset >= this.chunks[0].length) { this.offset -= this.chunks[0].length; this.chunks.shift() }
   }
   private async more(): Promise<void> {
     const reply = await this.api.network.read(this.id, 65536)
@@ -89,10 +134,8 @@ class Connection {
       return
     }
     this.emptyReads = 0
-    const next = new Uint8Array(this.buffer.length + bytes.length)
-    next.set(this.buffer)
-    next.set(bytes, this.buffer.length)
-    this.buffer = next
+    this.chunks.push(bytes)
+    this.available += bytes.length
   }
   async authenticate(account: EmailAccount, kind: 'imap' | 'smtp', prefix: string, suffix = '\r\n'): Promise<void> {
     const credential = account.provider === 'pureemail'
@@ -111,6 +154,8 @@ class Connection {
 
 type ImapValue = string | null | Uint8Array | ImapValue[]
 interface ImapReply { line: string; tokens: ImapValue[] }
+/** Stands in for a literal larger than the command allowed; its bytes were drained, not kept. */
+export const SKIPPED_LITERAL: Uint8Array = new Uint8Array(0)
 
 export function parseImapResponse(parts: Array<string | Uint8Array>): ImapValue[] {
   const literals: Uint8Array[] = []
@@ -179,25 +224,26 @@ function quote(value: string): string {
 class ImapConnection extends Connection {
   private sequence = 0
   readonly capabilities = new Set<string>()
-  private async reply(): Promise<ImapReply> {
+  private async reply(literalLimit = MAX_MESSAGE_BYTES): Promise<ImapReply> {
     let line = await this.line()
     const first = line
     const parts: Array<string | Uint8Array> = []
     while (/\{\d+\+?\}$/.test(line)) {
       const literal = /\{(\d+)\+?\}$/.exec(line)!
-      parts.push(line.slice(0, literal.index), await this.bytes(Number(literal[1])))
+      const length = Number(literal[1])
+      parts.push(line.slice(0, literal.index), length > literalLimit ? (await this.bytes(length, false), SKIPPED_LITERAL) : await this.bytes(length))
       line = await this.line()
     }
     parts.push(line)
     return { line: first, tokens: parseImapResponse(parts) }
   }
-  private async finish(tag: string): Promise<ImapReply[]> {
+  private async finish(tag: string, literalLimit?: number): Promise<ImapReply[]> {
     const replies: ImapReply[] = []
     for (let count = 0; count < 100000; count++) {
       if (count && count % 32 === 0) await yieldTurn()
-      const reply = await this.reply()
+      const reply = await this.reply(literalLimit)
       if (reply.line.startsWith(`${tag} `)) {
-        if (!reply.line.startsWith(`${tag} OK`)) throw new Error(mailDiagnostic(reply.line.replace(/^\S+\s+\S+\s*/, '')))
+        if (!reply.line.startsWith(`${tag} OK`)) throw new ImapRefusal(mailDiagnostic(reply.line.replace(/^\S+\s+\S+\s*/, '')))
         return [...replies, reply]
       }
       if (reply.line.startsWith('* BYE')) throw new Error(t('email.backend.ended'))
@@ -206,9 +252,20 @@ class ImapConnection extends Connection {
     }
     throw new Error(t('email.backend.imapLimit'))
   }
-  async command(command: string): Promise<ImapReply[]> {
+  /** Run one tagged command; literals larger than `literalLimit` are drained and replaced by {@link SKIPPED_LITERAL}. */
+  async command(command: string, literalLimit?: number): Promise<ImapReply[]> {
     const tag = `V${++this.sequence}`
     await this.write(`${tag} ${command}\r\n`)
+    return this.finish(tag, literalLimit)
+  }
+  /** APPEND one message as a synchronising literal. */
+  async append(mailbox: string, flags: string[], message: Uint8Array): Promise<ImapReply[]> {
+    const tag = `V${++this.sequence}`
+    await this.write(`${tag} APPEND ${quote(mailbox)} (${flags.join(' ')}) {${message.length}}\r\n`)
+    const ready = await this.line()
+    if (!ready.startsWith('+')) throw ready.startsWith(`${tag} `) ? new ImapRefusal(mailDiagnostic(ready.replace(/^\S+\s+\S+\s*/, ''))) : new Error(t('email.backend.imapResponse'))
+    for (let offset = 0; offset < message.length; offset += 32768) await this.api.network.write(this.id, encodeBytes(message.subarray(offset, offset + 32768)))
+    await this.write('\r\n')
     return this.finish(tag)
   }
   async initialize(account: EmailAccount): Promise<void> {
@@ -232,9 +289,30 @@ class ImapConnection extends Connection {
   }
 }
 
-async function withImap<T>(api: MailTransportApi, account: EmailAccount, run: (connection: ImapConnection) => Promise<T>): Promise<T> {
+/**
+ * Store a sent message in the account's Sent folder (special use \\Sent, else a folder named like it) with \\Seen.
+ * Returns the folder and, when the server reports APPENDUID, the copy's UID and UIDVALIDITY.
+ */
+export async function appendSentMessage(api: MailTransportApi, account: EmailAccount, mime: Uint8Array): Promise<{ folder: string; uid?: number; uidValidity?: number }> {
+  return withImap(api, account, async (connection) => {
+    const folders = mailboxReplies(await connection.command('LIST "" "*"')).filter(folder => folder.selectable)
+    const sent = folders.find(folder => folder.specialUse?.toLowerCase() === '\\sent') ?? folders.find(folder => /^(?:sent|sent items|sent messages|sent mail)$/i.test(folder.name))
+    if (!sent) throw new Error(t('email.backend.mailboxMissing', { mailbox: t('email.backend.sent') }))
+    const replies = await connection.append(sent.path, ['\\Seen'], mime)
+    const match = /\[APPENDUID (\d+) (\d+)\]/i.exec(replies.map(reply => reply.line).join('\n'))
+    return { folder: sent.path, ...(match ? { uidValidity: Number(match[1]), uid: Number(match[2]) } : {}) }
+  })
+}
+
+async function openImap(api: MailTransportApi, account: EmailAccount): Promise<ImapConnection> {
   const connection = new ImapConnection(api, await api.network.open(accountEndpoint(account, 'imap')))
-  try { await connection.initialize(account); return await run(connection) }
+  try { await connection.initialize(account) } catch (error) { await connection.close(); throw error }
+  return connection
+}
+
+async function withImap<T>(api: MailTransportApi, account: EmailAccount, run: (connection: ImapConnection) => Promise<T>): Promise<T> {
+  const connection = await openImap(api, account)
+  try { return await run(connection) }
   finally { await connection.close() }
 }
 
@@ -272,47 +350,370 @@ function fetchedFields(replies: ImapReply[]): Map<string, ImapValue>[] {
 const fetchedUid = (fields: Map<string, ImapValue>): number => Number(fields.get('UID'))
 const fetchedFlags = (fields: Map<string, ImapValue>): string[] => { const flags = fields.get('FLAGS'); return Array.isArray(flags) ? flags.filter((value): value is string => typeof value === 'string') : [] }
 const fetchedReceivedAt = (fields: Map<string, ImapValue>): string | undefined => typeof fields.get('INTERNALDATE') === 'string' ? String(fields.get('INTERNALDATE')) : undefined
+const fetchedSize = (fields: Map<string, ImapValue>): number | undefined => { const size = Number(fields.get('RFC822.SIZE')); return Number.isSafeInteger(size) && size >= 0 ? size : undefined }
+const valueText = (value: ImapValue | undefined): string => typeof value === 'string' ? value : value instanceof Uint8Array ? decoder.decode(value.slice()) : ''
+const months = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec']
+/** ISO time of an IMAP INTERNALDATE (`09-Sep-2026 10:00:00 +0000`), or '' when it cannot be read. */
+export function internalDateIso(value: string | undefined): string {
+  const match = /^\s*(\d{1,2})-([A-Za-z]{3})-(\d{4}) (\d{2}):(\d{2}):(\d{2}) ([+-])(\d{2})(\d{2})$/.exec(value ?? '')
+  const month = match ? months.indexOf(match[2].toLowerCase()) : -1
+  if (!match || month < 0) return ''
+  const offset = (match[7] === '-' ? -1 : 1) * (Number(match[8]) * 60 + Number(match[9]))
+  return new Date(Date.UTC(Number(match[3]), month, Number(match[1]), Number(match[4]), Number(match[5]), Number(match[6])) - offset * 60_000).toISOString()
+}
 
-export async function fetchFolder(api: MailTransportApi, account: EmailAccount, folder: string, limit: number, cached?: (uids: number[], uidValidity: number | undefined) => Promise<Map<number, CachedMessage>>): Promise<{ messages: CachedMessage[]; uidValidity?: number }> {
-  return withImap(api, account, async (connection) => {
-    const selected = await connection.command(`SELECT ${quote(folder)}`)
-    const total = Number(selected.find((reply) => reply.tokens[2] === 'EXISTS')?.tokens[1] ?? 0)
-    const epoch = selected.map(reply => /\[UIDVALIDITY (\d+)\]/i.exec(reply.line)?.[1]).find(Boolean)
-    const uidValidity = epoch ? Number(epoch) : undefined
-    if (!total) return { messages: [], uidValidity }
-    const range = `${Math.max(1, total - limit + 1)}:*`
-    const fetchBodies = async (set: string) => fetchedFields(await connection.command(`${set} (UID FLAGS INTERNALDATE BODY.PEEK[])`))
-    let listed: Map<string, ImapValue>[] | undefined
-    let known = new Map<number, CachedMessage>()
-    let bodies: Map<string, ImapValue>[]
-    if (cached) {
-      listed = fetchedFields(await connection.command(`FETCH ${range} (UID FLAGS INTERNALDATE)`))
-      known = await cached(listed.map(fetchedUid), uidValidity)
-      const missing = listed.map(fetchedUid).filter(uid => !known.has(uid))
-      bodies = missing.length ? await fetchBodies(`UID FETCH ${missing.join(',')}`) : []
-    } else bodies = await fetchBodies(`FETCH ${range}`)
-    const fetched = new Map<number, CachedMessage>()
-    for (const fields of bodies) {
-      const raw = fields.get('BODY[]') ?? fields.get('RFC822')
-      const uid = fetchedUid(fields)
-      if (!(raw instanceof Uint8Array)) continue
-      const parsed = await parseMail(raw)
-      await yieldTurn()
-      fetched.set(uid, { uid, uidValidity, complete: true, automationHeaders: automationHeaders(parsed.headers), originalDate: parsed.date ?? null, receivedAt: fetchedReceivedAt(fields),
-        attachmentDigests: await Promise.all(parsed.attachments.map(async attachment => digest(JSON.stringify([attachment.filename, attachment.mimeType, attachment.contentId ?? null, await digest(typeof attachment.content === 'string' ? attachment.content : new Uint8Array(attachment.content))])))),
-        bcc: addressText(parsed.bcc) || undefined, messageId: parsed.messageId ?? '', from: addressText(parsed.from ? [parsed.from] : []),
-        replyTo: addressText(parsed.replyTo) || undefined, to: addressText(parsed.to), cc: addressText(parsed.cc) || undefined,
-        subject: parsed.subject ?? '(no subject)', date: parsed.date && Number.isFinite(Date.parse(parsed.date)) ? new Date(parsed.date).toISOString() : '',
-        snippet: (parsed.text ?? '').replace(/\s+/g, ' ').trim().slice(0, 200), text: parsed.text, html: parsed.html,
-        flags: fetchedFlags(fields), hasAttachments: parsed.attachments.length > 0 })
+interface StructurePart { part: string; type: string; subtype: string; params: Record<string, string>; id?: string; encoding: string; size: number; disposition?: string; filename?: string }
+
+function parameters(value: ImapValue | undefined): Record<string, string> {
+  const result: Record<string, string> = {}
+  if (!Array.isArray(value)) return result
+  for (let index = 0; index + 1 < value.length; index += 2) {
+    const key = valueText(value[index]).toLowerCase(), raw = valueText(value[index + 1])
+    if (key.endsWith('*')) {
+      const extended = /^([^']*)'[^']*'(.*)$/.exec(raw)
+      let decoded = extended?.[2] ?? raw
+      try { decoded = /^utf-?8$/i.test(extended?.[1] ?? 'utf-8') ? decodeURIComponent(decoded) : unescape(decoded) } catch { /* Keep the undecoded value. */ }
+      result[key.slice(0, -1)] = decoded
+    } else if (!(key in result)) result[key] = decodeWords(raw)
+  }
+  return result
+}
+
+/** Leaf parts of a BODYSTRUCTURE with their RFC 3501 part numbers; message/rfc822 parts stay leaves. */
+export function structureParts(value: ImapValue | undefined, prefix = ''): StructurePart[] {
+  if (!Array.isArray(value) || !value.length) return []
+  if (Array.isArray(value[0])) {
+    const parts: StructurePart[] = []
+    let index = 0
+    for (const child of value) {
+      if (!Array.isArray(child)) break
+      index++
+      parts.push(...structureParts(child, prefix ? `${prefix}.${index}` : String(index)))
     }
-    const messages = listed ? listed.flatMap((fields): CachedMessage[] => {
-      const uid = fetchedUid(fields), stored = known.get(uid)
-      if (stored) return [{ ...stored, uid, uidValidity, flags: fetchedFlags(fields), receivedAt: fetchedReceivedAt(fields) }]
-      const message = fetched.get(uid)
-      return message ? [message] : []
-    }) : [...fetched.values()]
-    return { messages, uidValidity }
+    return parts
+  }
+  const type = valueText(value[0]).toLowerCase(), subtype = valueText(value[1]).toLowerCase(), params = parameters(value[2])
+  const extension = type === 'text' ? 8 : type === 'message' && subtype === 'rfc822' ? 10 : 7
+  const disposition = Array.isArray(value[extension + 1]) ? value[extension + 1] as ImapValue[] : undefined
+  const dispositionParams = parameters(disposition?.[1])
+  return [{ part: prefix || '1', type, subtype, params, id: valueText(value[3]) || undefined, encoding: valueText(value[5]).toLowerCase() || '7bit',
+    size: Number(valueText(value[6])) || 0, disposition: disposition ? valueText(disposition[0]).toLowerCase() : undefined, filename: dispositionParams.filename ?? params.name }]
+}
+
+const decodedSize = (part: StructurePart): number => part.encoding === 'base64' ? Math.floor(part.size * 57 / 78) : part.size
+
+/** Split structure leaves into the readable text/HTML bodies and the attachments. */
+export function messageLayout(parts: StructurePart[]): { bodies: MailBodyPart[]; attachments: MailAttachmentPart[] } {
+  const bodies: MailBodyPart[] = [], attachments: MailAttachmentPart[] = []
+  for (const part of parts) {
+    if (part.type === 'text' && (part.subtype === 'plain' || part.subtype === 'html') && part.disposition !== 'attachment' && !(part.filename && part.disposition !== 'inline')) {
+      bodies.push({ part: part.part, kind: part.subtype === 'html' ? 'html' : 'text', encoding: part.encoding, size: part.size, ...(part.params.charset ? { charset: part.params.charset } : {}) })
+    } else {
+      attachments.push({ part: part.part, filename: part.filename || `${part.type}-${part.subtype}`, mimeType: `${part.type}/${part.subtype}`, encoding: part.encoding, encodedSize: part.size, size: decodedSize(part),
+        ...(part.disposition === 'inline' ? { inline: true } : {}), ...(part.id ? { contentId: part.id } : {}) })
+    }
+  }
+  return { bodies, attachments }
+}
+
+/** Parts above this size are decoded slice by slice instead of through the MIME parser, which keeps several copies of every line. */
+const STREAMED_PART_BYTES = 256 * 1024
+
+function transferDecoder(encoding: string): (slice: Uint8Array, final: boolean) => Uint8Array {
+  let carry = new Uint8Array()
+  const joined = (slice: Uint8Array): Uint8Array => { if (!carry.length) return slice; const next = new Uint8Array(carry.length + slice.length); next.set(carry); next.set(slice, carry.length); return next }
+  if (encoding === 'base64') return (slice, final) => {
+    const input = joined(slice)
+    const clean = new Uint8Array(input.length)
+    let length = 0
+    for (const byte of input) if (byte >= 65 && byte <= 90 || byte >= 97 && byte <= 122 || byte >= 47 && byte <= 57 || byte === 43 || byte === 61) clean[length++] = byte
+    const usable = final ? length : length - length % 4
+    carry = clean.slice(usable, length)
+    let text = ''
+    for (let index = 0; index < usable; index += 32768) text += String.fromCharCode(...clean.subarray(index, Math.min(usable, index + 32768)))
+    return text ? decodeBytes(text) : new Uint8Array()
+  }
+  if (encoding === 'quoted-printable') return (slice, final) => {
+    const input = joined(slice)
+    const last = input.lastIndexOf(61)
+    const keep = !final && last >= 0 && last >= input.length - 2 ? input.length - last : 0
+    carry = input.slice(input.length - keep)
+    const out = new Uint8Array(input.length)
+    let length = 0
+    const hex = (value: number): number => value >= 48 && value <= 57 ? value - 48 : (value | 32) >= 97 && (value | 32) <= 102 ? (value | 32) - 87 : -1
+    for (let index = 0; index < input.length - keep; index++) {
+      const byte = input[index]
+      if (byte !== 61) { out[length++] = byte; continue }
+      if (input[index + 1] === 13 && input[index + 2] === 10) { index += 2; continue }
+      if (input[index + 1] === 10) { index += 1; continue }
+      const high = hex(input[index + 1] ?? -1), low = hex(input[index + 2] ?? -1)
+      if (high >= 0 && low >= 0) { out[length++] = high * 16 + low; index += 2 } else out[length++] = byte
+    }
+    return out.slice(0, length)
+  }
+  return slice => slice
+}
+
+/** Decode a part slice by slice into pieces (one per slice), so no step copies or scans the whole body at once. */
+export async function decodeBodyPieces(bytes: Uint8Array, part: MailBodyPart): Promise<string[]> {
+  let text: TextDecoder
+  try { text = new TextDecoder(part.charset || 'utf-8') } catch { text = new TextDecoder() }
+  const transfer = transferDecoder(part.encoding.toLowerCase())
+  const pieces: string[] = []
+  let carry = ''
+  for (let offset = 0; ; offset += STREAMED_PART_BYTES) {
+    const final = offset + STREAMED_PART_BYTES >= bytes.length
+    let piece = carry + text.decode(transfer(bytes.slice(offset, offset + STREAMED_PART_BYTES), final), { stream: !final })
+    carry = ''
+    if (part.kind === 'text') {
+      if (!final && piece.endsWith('\r')) { carry = '\r'; piece = piece.slice(0, -1) }
+      piece = piece.replace(/\r\n?/g, '\n')
+    }
+    if (piece) pieces.push(piece)
+    await yieldTurn()
+    if (final) return pieces
+  }
+}
+
+/** Decode one fetched text/HTML body part by its transfer encoding and charset. */
+export async function decodeBodyPart(bytes: Uint8Array, part: MailBodyPart): Promise<string> {
+  if (bytes.length > STREAMED_PART_BYTES) return (await decodeBodyPieces(bytes, part)).join('')
+  const head = encoder.encode(`Content-Type: text/${part.kind === 'html' ? 'html' : 'plain'}; charset="${(part.charset ?? 'utf-8').replace(/["\\\r\n]/g, '')}"\r\nContent-Transfer-Encoding: ${part.encoding.replace(/[^\w-]/g, '')}\r\n\r\n`)
+  const entity = new Uint8Array(head.length + bytes.length)
+  entity.set(head); entity.set(bytes, head.length)
+  const parsed = await parseMail(entity)
+  return (part.kind === 'html' ? parsed.html : parsed.text) ?? ''
+}
+
+async function messageFields(parsed: Email, uid: number, uidValidity: number | undefined, fields: Map<string, ImapValue>, rest: Pick<CachedMessage, 'complete' | 'attachmentDigests' | 'text' | 'html' | 'hasAttachments' | 'structure'>): Promise<CachedMessage> {
+  const text = rest.text
+  return { uid, uidValidity, automationHeaders: automationHeaders(parsed.headers), originalDate: parsed.date ?? null, receivedAt: fetchedReceivedAt(fields),
+    bcc: addressText(parsed.bcc) || undefined, messageId: parsed.messageId ?? '', from: addressText(parsed.from ? [parsed.from] : []),
+    replyTo: addressText(parsed.replyTo) || undefined, to: addressText(parsed.to), cc: addressText(parsed.cc) || undefined,
+    subject: parsed.subject ?? '(no subject)', date: parsed.date && Number.isFinite(Date.parse(parsed.date)) ? new Date(parsed.date).toISOString() : '',
+    snippet: (text ?? '').slice(0, 4000).replace(/\s+/g, ' ').trim().slice(0, 200), flags: fetchedFlags(fields), ...rest }
+}
+
+/** A whole message from `BODY[]`, with content digests exactly as before and the attachment parts from BODYSTRUCTURE. */
+async function wholeMessage(raw: Uint8Array, uid: number, uidValidity: number | undefined, fields: Map<string, ImapValue>): Promise<CachedMessage> {
+  const parsed = await parseMail(raw)
+  await yieldTurn()
+  const attachmentDigests = await Promise.all(parsed.attachments.map(async attachment => digest(JSON.stringify([attachment.filename, attachment.mimeType, attachment.contentId ?? null, await digest(typeof attachment.content === 'string' ? attachment.content : new Uint8Array(attachment.content))]))))
+  const attachments = messageLayout(structureParts(fields.get('BODYSTRUCTURE'))).attachments
+  return messageFields(parsed, uid, uidValidity, fields, { complete: true, attachmentDigests, text: parsed.text, html: parsed.html, hasAttachments: parsed.attachments.length > 0,
+    structure: { size: fetchedSize(fields) ?? raw.length, attachments } })
+}
+
+/** A large message: headers, structure and the text bodies up to the part limit; attachments are listed, never downloaded. */
+async function structuredMessage(connection: ImapConnection, uid: number, uidValidity: number | undefined): Promise<CachedMessage> {
+  const replies = await connection.command(`UID FETCH ${uid} (UID FLAGS INTERNALDATE RFC822.SIZE BODYSTRUCTURE BODY.PEEK[HEADER]<0.${MAIL_SYNC_LIMITS.headerBytes}>)`, MAIL_SYNC_LIMITS.headerBytes)
+  const fields = fetchedFields(replies).find(entry => fetchedUid(entry) === uid)
+  if (!fields) throw new Error(t('email.backend.messageMissing'))
+  const header = [...fields.entries()].find(([key]) => key.startsWith('BODY[HEADER]'))?.[1]
+  const headerBytes = header instanceof Uint8Array ? header : new Uint8Array()
+  const cut = headerBytes.length >= MAIL_SYNC_LIMITS.headerBytes ? Math.max(0, headerBytes.lastIndexOf(10) + 1) : headerBytes.length
+  const head = new Uint8Array(cut + 4)
+  head.set(headerBytes.subarray(0, cut)); head.set([13, 10, 13, 10], cut)
+  const parsed = await parseMail(head)
+  const { bodies, attachments } = messageLayout(structureParts(fields.get('BODYSTRUCTURE')))
+  let budget = MAIL_SYNC_LIMITS.bodyBytes
+  const wanted = bodies.filter(part => part.size <= budget && (budget -= part.size, true))
+  const deferred = bodies.filter(part => !wanted.includes(part))
+  const content = await bodyContent(connection, uid, wanted, MAIL_SYNC_LIMITS.bodyBytes * 2)
+  const missing = wanted.filter(part => content.get(part.part) === undefined)
+  const { text, html } = joinBodies(bodies, content)
+  const structure: MailStructure = { size: fetchedSize(fields), attachments, ...(deferred.length || missing.length ? { deferred: [...deferred, ...missing] } : {}) }
+  const complete = !structure.deferred
+  return messageFields(parsed, uid, uidValidity, fields, { complete, text, html, hasAttachments: attachments.length > 0, structure,
+    attachmentDigests: await Promise.all(attachments.map(part => digest(JSON.stringify(['part', part.part, part.filename, part.mimeType, part.contentId ?? null, part.encodedSize])))) })
+}
+
+async function bodyContent(connection: ImapConnection, uid: number, parts: MailBodyPart[], literalLimit: number): Promise<Map<string, string>> {
+  const content = new Map<string, string>()
+  if (!parts.length) return content
+  const replies = await connection.command(`UID FETCH ${uid} (${parts.map(part => `BODY.PEEK[${part.part}]`).join(' ')})`, literalLimit)
+  const fields = fetchedFields(replies).find(entry => fetchedUid(entry) === uid)
+  for (const part of parts) {
+    const bytes = fields?.get(`BODY[${part.part}]`)
+    if (bytes instanceof Uint8Array && bytes !== SKIPPED_LITERAL) { content.set(part.part, await decodeBodyPart(bytes, part)); await yieldTurn() }
+  }
+  return content
+}
+
+function joinBodies(bodies: MailBodyPart[], content: Map<string, string>): { text?: string; html?: string } {
+  const pick = (kind: MailBodyPart['kind']) => { const values = bodies.filter(part => part.kind === kind && content.has(part.part)).map(part => content.get(part.part)!); return values.length ? values.join('\n') : undefined }
+  return { text: pick('text'), html: pick('html') }
+}
+
+/** A message that could not be downloaded: kept once with its listing data so later syncs do not fetch it again. */
+function unavailableMessage(uid: number, uidValidity: number | undefined, listed: Map<string, ImapValue>, error: unknown): CachedMessage {
+  const receivedAt = fetchedReceivedAt(listed)
+  return { uid, uidValidity, receivedAt, complete: false, messageId: '', from: '', to: '', subject: t('email.backend.unavailableSubject'), date: internalDateIso(receivedAt), snippet: t('email.backend.unavailableSnippet'),
+    flags: fetchedFlags(listed), hasAttachments: false, structure: { size: fetchedSize(listed), failure: mailDiagnostic(error) } }
+}
+
+export interface FolderSyncHooks {
+  /** Called once after SELECT with the server's UIDVALIDITY, before anything is stored. */
+  epoch?(uidValidity: number | undefined): Promise<void>
+  /** Store newly downloaded messages; called per bounded batch so memory never holds the whole folder. */
+  store?(messages: CachedMessage[]): Promise<void>
+  /** Cached server UIDs of this folder in the current epoch, for reconciliation. */
+  cachedUids?(uidValidity: number): Promise<number[]>
+}
+
+export interface FolderSyncResult {
+  /** Listed messages that were already cached (flags refreshed), plus downloaded ones when no store hook took them. */
+  messages: CachedMessage[]
+  uidValidity?: number
+  /** Downloaded and stored messages, without their bodies. */
+  stored?: CachedMessage[]
+  /** UIDs that could not be downloaded and were stored as unavailable. */
+  unavailable?: number[]
+  /** Cached UIDs the server confirmed are gone; absent when the listing could not be verified. */
+  removed?: number[]
+  /** How many cached UIDs the reconciliation checked. */
+  checked?: number
+}
+
+const compactSet = (uids: number[]): string[] => {
+  const sorted = [...new Set(uids)].sort((a, b) => a - b), ranges: string[] = []
+  for (let index = 0; index < sorted.length;) {
+    let end = index
+    while (end + 1 < sorted.length && sorted[end + 1] === sorted[end] + 1) end++
+    ranges.push(end > index ? `${sorted[index]}:${sorted[end]}` : String(sorted[index]))
+    index = end + 1
+  }
+  return ranges
+}
+
+function searchUids(replies: ImapReply[]): number[] {
+  return replies.flatMap(reply => reply.tokens[0] === '*' && String(reply.tokens[1]).toUpperCase() === 'SEARCH' ? reply.tokens.slice(2).map(value => Number(value)).filter(uid => Number.isSafeInteger(uid) && uid > 0) : [])
+}
+
+/**
+ * Synchronise one folder window: list UIDs, flags and sizes; download missing messages in byte-bounded batches (large ones as
+ * structure plus text bodies); keep a message that fails once as unavailable; and, with `cachedUids`, report cached UIDs the
+ * server no longer has. Any refusal, dropped connection or inconsistent answer leaves `removed` undefined.
+ */
+export async function fetchFolder(api: MailTransportApi, account: EmailAccount, folder: string, limit: number, cached?: (uids: number[], uidValidity: number | undefined) => Promise<Map<number, CachedMessage>>, hooks: FolderSyncHooks = {}): Promise<FolderSyncResult> {
+  let connection = await openImap(api, account)
+  let broken = false
+  const select = async (): Promise<{ total: number; uidValidity?: number }> => {
+    const selected = await connection.command(`SELECT ${quote(folder)}`)
+    const epoch = selected.map(reply => /\[UIDVALIDITY (\d+)\]/i.exec(reply.line)?.[1]).find(Boolean)
+    return { total: Number(selected.find((reply) => reply.tokens[2] === 'EXISTS')?.tokens[1] ?? 0), uidValidity: epoch ? Number(epoch) : undefined }
+  }
+  try {
+    const { total, uidValidity } = await select()
+    await hooks.epoch?.(uidValidity)
+    const listing = total ? fetchedFields(await connection.command(`FETCH ${Math.max(1, total - limit + 1)}:* (UID FLAGS INTERNALDATE RFC822.SIZE)`)) : []
+    const consistent = listing.length === Math.min(total, limit)
+    const known = cached ? await cached(listing.map(fetchedUid), uidValidity) : new Map<number, CachedMessage>()
+    const pending = listing.filter(fields => !known.has(fetchedUid(fields)))
+    const downloaded: CachedMessage[] = [], unavailable: number[] = []
+    const reconnect = async (): Promise<void> => {
+      await connection.close()
+      connection = await openImap(api, account)
+      broken = false
+      if ((await select()).uidValidity !== uidValidity) throw new Error(t('email.backend.mailboxChanged'))
+    }
+    const keep = async (messages: CachedMessage[]): Promise<void> => {
+      if (!messages.length) return
+      if (hooks.store) { await hooks.store(messages); downloaded.push(...messages.map(({ text: _text, html: _html, ...summary }) => summary)) }
+      else downloaded.push(...messages)
+    }
+    // A refusal or a second failure on a fresh connection is the message's own: it is kept as unavailable. A failed reconnect aborts the sync.
+    const single = async (fields: Map<string, ImapValue>): Promise<CachedMessage> => {
+      const uid = fetchedUid(fields)
+      let failure: unknown
+      for (let attempt = 0; attempt < 2; attempt++) {
+        if (broken) await reconnect()
+        try { return await structuredMessage(connection, uid, uidValidity) }
+        catch (error) { failure = error; if (error instanceof ImapRefusal) break; broken = true }
+      }
+      unavailable.push(uid)
+      return unavailableMessage(uid, uidValidity, fields, failure)
+    }
+    const whole = pending.filter(fields => (fetchedSize(fields) ?? 0) <= MAIL_SYNC_LIMITS.wholeMessageBytes)
+    const large = pending.filter(fields => (fetchedSize(fields) ?? 0) > MAIL_SYNC_LIMITS.wholeMessageBytes)
+    for (let index = 0; index < whole.length;) {
+      const batch: Map<string, ImapValue>[] = []
+      let bytes = 0
+      while (index < whole.length && batch.length < MAIL_SYNC_LIMITS.batchMessages && (!batch.length || bytes + (fetchedSize(whole[index]) ?? 0) <= MAIL_SYNC_LIMITS.batchBytes)) { bytes += fetchedSize(whole[index]) ?? 0; batch.push(whole[index++]) }
+      let replies: Map<string, ImapValue>[] | undefined
+      try {
+        if (broken) await reconnect()
+        replies = fetchedFields(await connection.command(`UID FETCH ${batch.map(fetchedUid).join(',')} (UID FLAGS INTERNALDATE RFC822.SIZE BODYSTRUCTURE BODY.PEEK[])`, MAIL_SYNC_LIMITS.wholeMessageBytes * 2))
+      } catch (error) { if (!(error instanceof ImapRefusal)) broken = true }
+      const messages: CachedMessage[] = []
+      for (const fields of batch) {
+        const uid = fetchedUid(fields), reply = replies?.find(entry => fetchedUid(entry) === uid)
+        const raw = reply?.get('BODY[]') ?? reply?.get('RFC822')
+        if (reply && raw instanceof Uint8Array && raw !== SKIPPED_LITERAL) {
+          try { messages.push(await wholeMessage(raw, uid, uidValidity, reply)); continue } catch { /* Parsed again part by part below. */ }
+        }
+        if (replies && !reply) continue
+        messages.push(await single(fields))
+      }
+      await keep(messages)
+    }
+    for (const fields of large) await keep([await single(fields)])
+    const listed = listing.flatMap((fields): CachedMessage[] => {
+      const stored = known.get(fetchedUid(fields))
+      return stored ? [{ ...stored, uid: fetchedUid(fields), uidValidity, flags: fetchedFlags(fields), receivedAt: fetchedReceivedAt(fields) }] : []
+    })
+    const fresh = new Map(downloaded.map(message => [message.uid, message]))
+    const ordered = listing.flatMap((fields): CachedMessage[] => { const uid = fetchedUid(fields), message = listed.find(entry => entry.uid === uid) ?? fresh.get(uid); return message ? [message] : [] })
+    const result: FolderSyncResult = { messages: hooks.store ? listed : ordered, uidValidity, ...(hooks.store ? { stored: downloaded } : {}), ...(unavailable.length ? { unavailable } : {}) }
+    if (hooks.cachedUids && uidValidity !== undefined && consistent && !broken) {
+      try {
+        const candidates = [...new Set((await hooks.cachedUids(uidValidity)).filter(uid => Number.isSafeInteger(uid) && uid >= 1 && uid <= 0xffffffff))].sort((a, b) => a - b)
+        const present = new Set<number>()
+        for (let index = 0; index < candidates.length; index += 5000) for (const uid of searchUids(await connection.command(`UID SEARCH UID ${compactSet(candidates.slice(index, index + 5000)).join(',')}`))) present.add(uid)
+        const asked = new Set(candidates)
+        // The server must report every cached UID it just listed, and nothing it was not asked about; otherwise nothing is removed.
+        if (listing.every(fields => !asked.has(fetchedUid(fields)) || present.has(fetchedUid(fields))) && [...present].every(uid => asked.has(uid))) { result.removed = candidates.filter(uid => !present.has(uid)); result.checked = candidates.length }
+      } catch { /* An unverified listing removes nothing. */ }
+    }
+    return result
+  } finally { await connection.close() }
+}
+
+/** Download the deferred text bodies of one message (or the whole message when it was stored unavailable). */
+export async function fetchMessageContent(api: MailTransportApi, account: EmailAccount, folder: string, uid: number, uidValidity: number | undefined, deferred: MailBodyPart[] | undefined): Promise<{ text?: string[]; html?: string[]; message?: CachedMessage }> {
+  return withImap(api, account, async (connection) => {
+    const selected = await connection.command(`EXAMINE ${quote(folder)}`)
+    const epoch = selected.map(reply => /\[UIDVALIDITY (\d+)\]/i.exec(reply.line)?.[1]).find(Boolean)
+    if (uidValidity !== undefined && Number(epoch) !== uidValidity) throw new Error(t('email.backend.mailboxChanged'))
+    if (!deferred) return { message: await structuredMessage(connection, uid, uidValidity) }
+    const tooLarge = deferred.find(part => part.size > MAIL_SYNC_LIMITS.openPartBytes)
+    if (tooLarge) throw new Error(t('email.backend.bodyTooLarge', { size: Math.ceil(tooLarge.size / 1024 / 1024) }))
+    // One part per command, decoded into pieces: only one part's bytes are held at a time.
+    const body: { text?: string[]; html?: string[] } = {}
+    for (const part of deferred) {
+      const replies = await connection.command(`UID FETCH ${uid} (BODY.PEEK[${part.part}])`, MAIL_SYNC_LIMITS.openPartBytes * 2)
+      const bytes = fetchedFields(replies).find(entry => fetchedUid(entry) === uid)?.get(`BODY[${part.part}]`)
+      if (!(bytes instanceof Uint8Array) || bytes === SKIPPED_LITERAL) throw new Error(t('email.backend.messageMissing'))
+      const target = body[part.kind] ??= []
+      if (target.length) target.push('\n')
+      target.push(...await decodeBodyPieces(bytes, part))
+    }
+    return body
+  })
+}
+
+/** One slice of an attachment's encoded bytes, as stored on the server. */
+export async function fetchAttachmentSlice(api: MailTransportApi, account: EmailAccount, folder: string, uid: number, uidValidity: number | undefined, part: string, offset: number): Promise<Uint8Array> {
+  if (!/^\d+(?:\.\d+)*$/.test(part)) throw new Error(t('email.backend.messageMissing'))
+  return withImap(api, account, async (connection) => {
+    const selected = await connection.command(`EXAMINE ${quote(folder)}`)
+    const epoch = selected.map(reply => /\[UIDVALIDITY (\d+)\]/i.exec(reply.line)?.[1]).find(Boolean)
+    if (uidValidity !== undefined && Number(epoch) !== uidValidity) throw new Error(t('email.backend.mailboxChanged'))
+    const replies = await connection.command(`UID FETCH ${uid} (BODY.PEEK[${part}]<${offset}.${MAIL_SYNC_LIMITS.attachmentSliceBytes}>)`, MAIL_SYNC_LIMITS.attachmentSliceBytes)
+    const fields = fetchedFields(replies).find(entry => fetchedUid(entry) === uid)
+    const value = fields && [...fields.entries()].find(([key]) => key.startsWith(`BODY[${part}]`))?.[1]
+    if (!(value instanceof Uint8Array) || value === SKIPPED_LITERAL) throw new Error(t('email.backend.messageMissing'))
+    return value
   })
 }
 
@@ -320,7 +721,7 @@ export async function verifyImap(api: MailTransportApi, account: EmailAccount): 
   await withImap(api, account, (connection) => connection.command('EXAMINE "INBOX"').then(() => undefined))
 }
 
-export async function applyMessageAction(api: MailTransportApi, account: EmailAccount, folder: string, uid: number, action: EmailMessageAction, uidValidity?: number): Promise<{ destinationFolder?: string; destinationUid?: number }> {
+export async function applyMessageAction(api: MailTransportApi, account: EmailAccount, folder: string, uid: number, action: EmailMessageAction, uidValidity?: number): Promise<{ destinationFolder?: string; destinationUid?: number; destinationUidValidity?: number }> {
   return withImap(api, account, async (connection) => {
     const selected = await connection.command(`SELECT ${quote(folder)}`)
     const epoch = selected.map(reply => /\[UIDVALIDITY (\d+)\]/i.exec(reply.line)?.[1]).find(Boolean)
@@ -339,8 +740,8 @@ export async function applyMessageAction(api: MailTransportApi, account: EmailAc
         await connection.command(`UID STORE ${uid} +FLAGS.SILENT (\\Deleted)`)
         await connection.command(`UID EXPUNGE ${uid}`)
       }
-      const match = /\[COPYUID \d+ \d+ (\d+)\]/i.exec(replies.map((reply) => reply.line).join('\n'))
-      return { destinationFolder, ...(match ? { destinationUid: Number(match[1]) } : {}) }
+      const match = /\[COPYUID (\d+) \d+ (\d+)\]/i.exec(replies.map((reply) => reply.line).join('\n'))
+      return { destinationFolder, ...(match ? { destinationUid: Number(match[2]), destinationUidValidity: Number(match[1]) } : {}) }
     }
     const flag = action === 'flag' || action === 'unflag' ? '\\Flagged' : '\\Seen'
     await connection.command(`UID STORE ${uid} ${action === 'mark-unread' || action === 'unflag' ? '-' : '+'}FLAGS.SILENT (${flag})`)
@@ -384,7 +785,8 @@ export async function verifySmtp(api: MailTransportApi, account: EmailAccount): 
   try { await initializeSmtp(connection, account) } finally { await connection.close() }
 }
 
-export async function sendMail(api: MailTransportApi, account: EmailAccount, input: EmailSendInput, automatic?: { origin: string; messageId: string }): Promise<string> {
+/** Send through SMTP; after the server accepted the message, `accepted` receives its MIME bytes (for the copy in Sent). */
+export async function sendMail(api: MailTransportApi, account: EmailAccount, input: EmailSendInput, automatic?: { origin: string; messageId: string }, accepted?: (mime: Uint8Array) => void): Promise<string> {
   const recipients = [...parseEmailAddresses(input.to, true), ...parseEmailAddresses(input.cc ?? '', true), ...parseEmailAddresses(input.bcc ?? '', true)]
   if (!recipients.length) throw new MailSendError(t('email.backend.recipient'), 'not-applied')
   const message = createMimeMessage()
@@ -414,10 +816,12 @@ export async function sendMail(api: MailTransportApi, account: EmailAccount, inp
     await connection.write(`MAIL FROM:<${account.address}>\r\n`); await smtpReply(connection, [250])
     for (const recipient of recipients) { await connection.write(`RCPT TO:<${recipient.address}>\r\n`); await smtpReply(connection, [250, 251]) }
     await connection.write('DATA\r\n'); await smtpReply(connection, [354])
-    const raw = encoder.encode(message.asRaw().replace(/\r?\n/g, '\r\n').replace(/^\./gm, '..'))
+    const mime = message.asRaw().replace(/\r?\n/g, '\r\n')
+    const raw = encoder.encode(mime.replace(/^\./gm, '..'))
     for (let offset = 0; offset < raw.length; offset += 32768) await api.network.write(connection.id, encodeBytes(raw.subarray(offset, offset + 32768)))
     ended = true
     await connection.write('\r\n.\r\n'); await smtpReply(connection, [250])
+    accepted?.(encoder.encode(mime))
     return messageId
   } catch (error) {
     throw new MailSendError(mailDiagnostic(error), ended && !(error as { smtpReply?: boolean }).smtpReply ? 'unknown' : 'not-applied')

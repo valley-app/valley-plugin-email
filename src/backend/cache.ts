@@ -1,6 +1,6 @@
 import { t } from './localization'
 import type { PluginDataApi } from '@valley/plugin-sdk'
-import type { CachedMessage, EmailAccount } from '../mailTypes'
+import type { CachedMessage, EmailAccount, MailStructure } from '../mailTypes'
 import type { DatasetPage, DatasetRecord, DatasetRequest, DatasetTransactionOperation, DatasetWhere } from '@valley/plugin-sdk/datasets'
 import { identifyMessage } from './identity'
 import { readAutomationHeaders } from './automation'
@@ -84,8 +84,18 @@ function messageRow(accountId: string, message: CachedMessage): DatasetRecord {
     sortDate: message.date || '', projectionVersion: 1,
     from: message.from, replyTo: message.replyTo ?? null, to: message.to, cc: message.cc ?? null,
     subject: message.subject, date: message.date || '1970-01-01T00:00:00.000Z', snippet: message.snippet,
-    text: message.text ?? null, html: message.html ?? null, hasAttachments: message.hasAttachments
+    text: message.text ?? null, html: message.html ?? null, hasAttachments: message.hasAttachments,
+    structure: structureValue(message.structure)
   }
+}
+
+/** The structure record as a stored JSON value (it holds only JSON data). */
+const structureValue = (structure: MailStructure | undefined): DatasetRecord[string] => structure ? JSON.parse(JSON.stringify(structure)) as DatasetRecord[string] : null
+
+/** UIDs above 32 bits are local items (the Sent copy that sendEmail appends); the server never reports them, so sync never removes them. */
+export const isLocalUid = (uid: number): boolean => uid > 0xffffffff
+export function readStructure(value: unknown): MailStructure | undefined {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value as MailStructure : undefined
 }
 
 const withoutBody = (row: DatasetRecord): DatasetRecord => Object.fromEntries(Object.entries(row).filter(([column]) => column !== 'text' && column !== 'html'))
@@ -121,15 +131,23 @@ function folderOperations(
     }),
     ...[...after.values()].filter((message) => {
       const existing = before.get(message.uid)
-      return !existing || existing.logicalId !== message.logicalId || !sameFlags(existing.flags, message.flags)
+      return !existing || existing.logicalId !== message.logicalId || !sameFlags(existing.flags, message.flags) || (existing.uidValidity ?? null) !== (message.uidValidity ?? null)
     }).map((message) => { const flags = canonicalFlags(message.flags); return { dataset: scope.datasets.folderMessages, operation: 'upsert' as const, values: { accountId, folder, uid: message.uid, messageId: message.logicalId!, uidValidity: message.uidValidity ?? null, flags, ...flagProjection(flags), ...folderProjection(folder, undefined, flags) } } })
   ]
 }
 
+/** Characters of serialised operations per transaction: the host refuses a data request above 4 MiB, and a character takes at most 3 UTF-8 bytes here. */
+const TRANSACTION_CHARACTERS = 1024 * 1024
+
 async function writeOperations(scope: EmailStoreContext, operations: DatasetTransactionOperation[]): Promise<void> {
-  for (let index = 0; index < operations.length; index += 1000) {
-    await datasetRequest(scope, { operation: 'transaction', operations: operations.slice(index, index + 1000) })
+  let batch: DatasetTransactionOperation[] = [], characters = 0
+  const flush = async (): Promise<void> => { if (batch.length) await datasetRequest(scope, { operation: 'transaction', operations: batch }); batch = []; characters = 0 }
+  for (const operation of operations) {
+    const size = JSON.stringify(operation).length
+    if (batch.length && (batch.length >= 1000 || characters + size > TRANSACTION_CHARACTERS)) await flush()
+    batch.push(operation); characters += size
   }
+  await flush()
 }
 
 export async function readAccounts(scope: EmailStoreContext): Promise<EmailAccount[]> {
@@ -360,7 +378,8 @@ export async function moveCachedMessage(
   sourceFolder: string,
   destinationFolder: string,
   uid: number,
-  destinationUid?: number
+  destinationUid?: number,
+  destinationUidValidity?: number
 ): Promise<CachedMessage[]> {
   const source = await readFolder(scope, accountId, sourceFolder)
   const message = source.find((candidate) => candidate.uid === uid)
@@ -368,7 +387,7 @@ export async function moveCachedMessage(
   const operations = folderOperations(scope, accountId, sourceFolder, source, remaining)
   if (message && destinationUid !== undefined) {
     const destination = destinationFolder === sourceFolder ? remaining : await readFolder(scope, accountId, destinationFolder)
-    const moved = { ...message, uid: destinationUid }
+    const moved = { ...message, uid: destinationUid, uidValidity: destinationUidValidity ?? message.uidValidity }
     const merged = [moved, ...destination.filter((candidate) => candidate.uid !== destinationUid)]
       .sort((a, b) => (a.date < b.date ? 1 : -1))
     operations.push(...folderOperations(scope, accountId, destinationFolder, destination, merged))
@@ -407,14 +426,67 @@ export async function projectAssignments(scope: EmailStoreContext, ids: string[]
 
 export async function establishFolderEpoch(scope: EmailStoreContext, accountId: string, folder: string, uidValidity: number | undefined): Promise<boolean> {
   const previous = await scope.data.dataset('sync_state').get({ accountId, folder })
-  const reset = previous?.uidValidity !== uidValidity
+  const reset = (previous?.uidValidity ?? null) !== (uidValidity ?? null)
   if (reset) {
-    while (true) {
-      const page = await scope.data.dataset(scope.datasets.folderMessages).query({ where: { accountId, folder }, select: ['uid', 'messageId'], limit: 500 })
-      if (!page.rows.length) break
-      await scope.data.dataset(scope.datasets.folderMessages).deleteMany(page.rows.map(row => ({ accountId, folder, uid: Number(row.uid) })))
-      await projectAssignments(scope, [...new Set(page.rows.map(row => String(row.messageId)))])
-    }
+    const uids = (await queryAll(scope, scope.datasets.folderMessages, { accountId, folder }, ['uid'])).map(row => Number(row.uid)).filter(uid => !isLocalUid(uid))
+    await removeFromFolder(scope, accountId, folder, uids)
   }
   return Boolean(previous?.lastSyncAt && !reset && uidValidity !== undefined)
+}
+
+/** Cached server UIDs of a folder in one UIDVALIDITY epoch (local items excluded). */
+export async function cachedFolderUids(scope: EmailStoreContext, accountId: string, folder: string, uidValidity: number): Promise<number[]> {
+  return (await queryAll(scope, scope.datasets.folderMessages, { accountId, folder, uidValidity }, ['uid'])).map(row => Number(row.uid)).filter(uid => Number.isSafeInteger(uid) && !isLocalUid(uid))
+}
+
+/** Remove folder memberships; a message row (with its recipients) goes too once no folder of any account holds it. */
+export async function removeFromFolder(scope: EmailStoreContext, accountId: string, folder: string, uids: number[]): Promise<number> {
+  let removed = 0
+  for (let index = 0; index < uids.length; index += 100) {
+    const slice = [...new Set(uids.slice(index, index + 100))]
+    const memberships = await queryAll(scope, scope.datasets.folderMessages, { accountId, folder, uid: { in: slice } }, ['uid', 'messageId'])
+    if (!memberships.length) continue
+    const ids = [...new Set(memberships.map(row => String(row.messageId)))]
+    const leaving = new Set(memberships.map(row => Number(row.uid)))
+    const others = (await queryAll(scope, scope.datasets.folderMessages, { accountId, messageId: { in: ids } }, ['accountId', 'folder', 'uid', 'messageId']))
+      .filter(row => !(row.accountId === accountId && row.folder === folder && leaving.has(Number(row.uid))))
+    const kept = new Set(others.map(row => String(row.messageId)))
+    const orphaned = ids.filter(id => !kept.has(id))
+    const recipients = orphaned.length ? await queryAll(scope, scope.datasets.recipients, { messageId: { in: orphaned } }, ['messageId', 'kind', 'position']) : []
+    await writeOperations(scope, [
+      ...memberships.map(row => ({ dataset: scope.datasets.folderMessages, operation: 'delete' as const, key: { accountId, folder, uid: Number(row.uid) } })),
+      ...orphaned.map(id => ({ dataset: scope.datasets.messages, operation: 'delete' as const, key: { id } })),
+      ...recipients.map(row => ({ dataset: scope.datasets.recipients, operation: 'delete' as const, key: { messageId: String(row.messageId), kind: String(row.kind), position: Number(row.position) } }))
+    ])
+    await projectAssignments(scope, ids.filter(id => kept.has(id)))
+    removed += memberships.length
+  }
+  return removed
+}
+
+/** Remove local copies (the Sent copy kept before the server had one) once the folder holds the server's message with the same Message-ID. */
+export async function dropLocalCopies(scope: EmailStoreContext, accountId: string, folder: string): Promise<number> {
+  const local = await queryAll(scope, scope.datasets.folderMessages, { accountId, folder, uid: { gt: 0xffffffff } }, ['uid', 'messageId'])
+  if (!local.length) return 0
+  const replaced: number[] = []
+  for (const membership of local) {
+    const row = await scope.data.dataset(scope.datasets.messages).get({ id: String(membership.messageId) })
+    const messageId = typeof row?.messageId === 'string' ? row.messageId : ''
+    if (!messageId) continue
+    const same = await queryAll(scope, scope.datasets.messages, { accountId, messageId }, ['id'])
+    const held = same.length ? await queryAll(scope, scope.datasets.folderMessages, { accountId, folder, messageId: { in: same.map(entry => String(entry.id)) } }, ['uid']) : []
+    if (held.some(entry => !isLocalUid(Number(entry.uid)))) replaced.push(Number(membership.uid))
+  }
+  return replaced.length ? removeFromFolder(scope, accountId, folder, replaced) : 0
+}
+
+/** Store a body downloaded on demand into the cached message row, leaving its identity unchanged. */
+export async function storeOpenedBody(scope: EmailStoreContext, id: string, body: { text?: string; html?: string }, structure: MailStructure | undefined): Promise<void> {
+  const rest = structure ? { ...structure } : undefined
+  if (rest) delete rest.deferred
+  await scope.data.transaction([{ operation: 'update', dataset: scope.datasets.messages, key: { id }, values: {
+    ...(body.text !== undefined ? { text: body.text, snippet: body.text.slice(0, 4000).replace(/\s+/g, ' ').trim().slice(0, 200) } : {}),
+    ...(body.html !== undefined ? { html: body.html } : {}),
+    structure: structureValue(rest)
+  } }])
 }

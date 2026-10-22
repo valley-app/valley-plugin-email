@@ -210,6 +210,7 @@
   "email.backend.archive": "Archiv",
   "email.backend.junk": "Spam",
   "email.backend.trash": "Papierkorb",
+  "email.backend.sent": "Gesendet",
   "email.error.input": "Ein E-Mail-Auswahlobjekt wird erwartet.",
   "email.error.accountIds": "accountIds muss eine Liste von Konto-IDs sein.",
   "email.error.view": "Nicht unterstützte Postfachansicht.",
@@ -326,5 +327,17 @@
   "email.settings.connectionChecking": "Wird geprüft…",
   "email.settings.connectionOk": "Anmeldung erfolgreich",
   "email.settings.connectionFailed": "Verbindung fehlgeschlagen",
-  "email.backend.cachedFoldersWarning": "Zwischengespeicherte Ordner werden angezeigt. Verbindung fehlgeschlagen: {{error}}"
+  "email.backend.cachedFoldersWarning": "Zwischengespeicherte Ordner werden angezeigt. Verbindung fehlgeschlagen: {{error}}",
+  "email.backend.uidValidityMissing": "Der Mailserver hat die UIDVALIDITY des Ordners nicht gemeldet; der zwischengespeicherte Ordner bleibt unverändert.",
+  "email.backend.unavailableSubject": "Nachricht konnte nicht heruntergeladen werden",
+  "email.backend.unavailableSnippet": "Öffne die Nachricht, um es erneut zu versuchen.",
+  "email.backend.messageMissing": "Der Mailserver hat diese Nachricht nicht geliefert.",
+  "email.backend.bodyTooLarge": "Der Inhalt dieser Nachricht ist zu groß für die Anzeige ({{size}} MB).",
+  "email.attachments": "Anhänge",
+  "email.attachment.save": "{{name}} speichern",
+  "email.attachment.saved": "Gespeichert unter {{path}}",
+  "email.attachment.saveFailed": "Der Anhang konnte nicht gespeichert werden.",
+  "email.attachment.tooLarge": "Anhänge über {{size}} MB können hier noch nicht gespeichert werden.",
+  "email.body.loadFailed": "Der Nachrichteninhalt konnte nicht geladen werden.",
+  "email.body.truncated": "Diese Nachricht ist zu lang für die vollständige Anzeige: Angezeigt werden die ersten {{shown}} MB von {{total}} MB."
 }

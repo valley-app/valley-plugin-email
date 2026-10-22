@@ -1121,3 +1121,13 @@ it('syncs a folder on open only when it was not synced within the last minute', 
     expect(mock.mail.syncFolder).toHaveBeenCalledTimes(3 * perPass)
   } finally { clock.mockRestore() }
 })
+
+it('loads a deferred body when a selection opens a message (open-selection, history, search results)', async () => {
+  const text = 'Schilfrohrsänger äöüß '.repeat(60_000)
+  const mock = setup(undefined, { text: undefined, bodyDeferred: true })
+  mock.mail.loadMessageContent = vi.fn(async (input) => ({ ok: true, data: { field: input.field, offset: input.offset, total: input.field === 'text' ? text.length : 0, chunk: input.field === 'text' ? text.slice(input.offset, input.offset + 1024 * 1024) : '' } }))
+  const store = getStore()
+  await store.restoreSelection({ accountIds: ['one'], view: 'folder', folder: 'INBOX', message: { accountId: 'one', folder: 'INBOX', uid: 7 } })
+  expect(store.getSnapshot().selectedMessage).toMatchObject({ uid: 7, text: text.slice(0, 512 * 1024), bodyDeferred: false, bodyTruncated: { shown: 512 * 1024, total: text.length } })
+  expect(vi.mocked(mock.mail.loadMessageContent).mock.calls.filter(([input]) => input.field === 'text').map(([input]) => input.offset)).toEqual([0, 1024 * 1024])
+})

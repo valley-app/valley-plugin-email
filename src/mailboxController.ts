@@ -1,7 +1,7 @@
 import type { EmailDriver, EmailMailboxView, EmailMessageDetail, EmailMessageRef } from './mailTypes'
 import type { EmailSelection, EmailSnapshot } from './store'
 import type { createAccountsController } from './accountsController'
-import { messageKey, type createMessageController } from './messageController'
+import { loadDeferredBody, messageKey, type createMessageController } from './messageController'
 import { uiText } from './localization'
 
 interface MailboxPorts {
@@ -83,6 +83,10 @@ export function createMailboxController(mail: EmailDriver, ports: MailboxPorts) 
       if (!result.ok) throw new Error(result.error || uiText('email.error.readMessage'))
       if (!result.data?.message) throw new Error(uiText('email.error.messageMissing'))
       message = result.data.message
+      if (message.bodyDeferred) {
+        message = await loadDeferredBody(mail, message)
+        if (!ports.active() || generation !== ports.messages.selectionVersion()) return false
+      }
     }
     let folders: Awaited<ReturnType<typeof ports.accounts.readFolders>> | undefined
     const knownFolder = (accountId: string): boolean => selection.folder.toUpperCase() === 'INBOX'

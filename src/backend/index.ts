@@ -3,8 +3,9 @@ import { z } from 'zod'
 import type { PluginDataApi, PluginBackendApi, PluginBackendOperationContext } from '@valley/plugin-sdk'
 import type { EmailAccount, CachedMessage } from '../mailTypes'
 import { cacheMailboxes, cachedMailboxes, parseEmailAddresses, queryMessages, readMessage } from './query'
-import { readAccounts as readEmailAccounts, upsertAccount, getAccount as getEmailAccount, removeAccountFiles, readFolder, mergeFolder, establishFolderEpoch, appendMessage, folderCacheStats, updateMessageFlags, moveCachedMessage, emailStoreContext, captureAccountRestore, restoreAccountFiles, forgetCachedMessage, cachedFolderHeaders, pruneFolder, type EmailStoreContext } from './cache'
-import { accountEndpoint, credentialName, MAIL_CREDENTIAL_STORE, verifyImap, verifySmtp, mailDiagnostic, listFolders, fetchFolder, sendMail, MailSendError, applyMessageAction as applyRemoteMessageAction, type MailTransportApi } from './transport'
+import { readAccounts as readEmailAccounts, upsertAccount, getAccount as getEmailAccount, removeAccountFiles, readFolder, mergeFolder, establishFolderEpoch, appendMessage, folderCacheStats, updateMessageFlags, moveCachedMessage, emailStoreContext, captureAccountRestore, restoreAccountFiles, forgetCachedMessage, cachedFolderHeaders, pruneFolder, cachedFolderUids, removeFromFolder, dropLocalCopies, readStructure, storeOpenedBody, type EmailStoreContext } from './cache'
+import { accountEndpoint, credentialName, MAIL_CREDENTIAL_STORE, verifyImap, verifySmtp, mailDiagnostic, listFolders, fetchFolder, fetchMessageContent, fetchAttachmentSlice, appendSentMessage, sendMail, MailSendError, applyMessageAction as applyRemoteMessageAction, type MailTransportApi } from './transport'
+import { encodeBytes } from './encoding'
 import { createMailWorkQueue } from './workQueue'
 import { automationHeaders, MailRefusal, prepareAutomaticMail, type MailAutomationServices } from './automation'
 import { createWorkflowAdapter } from './workflow'
@@ -16,7 +17,7 @@ interface MailRpc {
 }
 
 export interface MailBackendApi extends MailTransportApi { services?: MailAutomationServices; notifications?: PluginBackendApi['notifications']; lifecycle?: PluginBackendApi['lifecycle']; settings?: PluginBackendApi['settings']; data: PluginDataApi; rpc: MailRpc; i18n?: { t(key: string, params?: Record<string, string | number>): string } }
-interface MailBackendContext extends EmailStoreContext, MailTransportApi { services?: MailAutomationServices & Partial<Pick<PluginBackendApi['services'], 'emit'>>; notifications?: PluginBackendApi['notifications']; settings?: PluginBackendApi['settings']; rpc: MailRpc; t: ReturnType<typeof createTranslator> }
+interface MailBackendContext extends EmailStoreContext, MailTransportApi { /** Large removals waiting for a second consistent sync, per backend instance. */ removals?: Map<string, Set<number>>; /** The last opened body too large for the cache, as decoded pieces. */ opened?: Map<string, { text?: string[]; html?: string[] }>; services?: MailAutomationServices & Partial<Pick<PluginBackendApi['services'], 'emit'>>; notifications?: PluginBackendApi['notifications']; settings?: PluginBackendApi['settings']; rpc: MailRpc; t: ReturnType<typeof createTranslator> }
 
 class RemoteMailCacheError extends Error {
   constructor(message: string, readonly result: unknown) { super(message) }
@@ -197,9 +198,22 @@ const methods = {
       scope.rpc.emit('sync', { accountId: p.accountId, folder: p.folder, status: 'start' })
       try {
         const previous = await scope.data.dataset('sync_state').get({ accountId: p.accountId, folder: p.folder })
-        const { messages, uidValidity } = await fetchFolder(scope, account, p.folder, p.limit, async (uids, epoch) => previous?.uidValidity === epoch ? cachedFolderHeaders(scope, p.accountId, p.folder, uids, epoch) : new Map())
-        const established = await establishFolderEpoch(scope, p.accountId, p.folder, uidValidity)
-        let count = await mergeFolder(scope, p.accountId, p.folder, messages)
+        let established: boolean | undefined
+        // The folder's epoch is settled right after SELECT, before any batch is stored; a SELECT without UIDVALIDITY never wipes a known folder.
+        const epoch = async (value: number | undefined): Promise<void> => {
+          if (value === undefined && typeof previous?.uidValidity === 'number') throw new Error(scope.t('email.backend.uidValidityMissing'))
+          established = await establishFolderEpoch(scope, p.accountId, p.folder, value)
+        }
+        const synced = await fetchFolder(scope, account, p.folder, p.limit, async (uids, value) => previous?.uidValidity === value ? cachedFolderHeaders(scope, p.accountId, p.folder, uids, value) : new Map(), {
+          epoch, store: async (batch) => { await mergeFolder(scope, p.accountId, p.folder, batch) }, cachedUids: (value) => cachedFolderUids(scope, p.accountId, p.folder, value)
+        })
+        const uidValidity = synced.uidValidity
+        if (established === undefined) await epoch(uidValidity)
+        const messages = [...synced.messages, ...synced.stored ?? []]
+        let count = await mergeFolder(scope, p.accountId, p.folder, synced.messages)
+        const removing = synced.removed && uidValidity !== undefined ? confirmedRemovals(scope.removals ?? new Map(), `${p.accountId}\n${p.folder}\n${uidValidity}`, synced.removed, synced.checked ?? 0) : []
+        const removed = (removing.length ? await removeFromFolder(scope, p.accountId, p.folder, removing) : 0) + await dropLocalCopies(scope, p.accountId, p.folder)
+        if (removed) count = await scope.data.dataset('folder_messages').count({ accountId: p.accountId, folder: p.folder })
         const keepDays = Number(scope.settings?.get().cacheDays)
         if (Number.isSafeInteger(keepDays) && keepDays > 0 && await pruneFolder(scope, p.accountId, p.folder, messages.map(message => message.uid), keepDays)) count = await scope.data.dataset('folder_messages').count({ accountId: p.accountId, folder: p.folder })
         const arrived = established && p.folder.toUpperCase() === 'INBOX' ? messages.filter(message => message.uid > Number(previous?.cursor ?? 0) && !message.flags.includes('\\Seen') && message.receivedAt && Date.parse(message.receivedAt) >= Date.parse(String(previous?.lastSyncAt))).map(message => message.uid) : []
@@ -228,7 +242,9 @@ const methods = {
           status: 'done',
           arrived: arrivedIds,
           fetched: messages.length,
-          total: count
+          total: count,
+          ...(synced.unavailable?.length ? { unavailable: synced.unavailable.length } : {}),
+          ...(removed ? { removed } : {})
         })
         return { fetched: messages.length, total: count }
       } catch (err) {
@@ -280,16 +296,21 @@ const methods = {
       const attempt = crypto.randomUUID()
       const automatic = await prepareAutomaticMail(scope, account, p)
       let messageId: string
-      try { messageId = await sendMail(scope, account, p, automatic) }
+      let mime: Uint8Array | undefined
+      try { messageId = await sendMail(scope, account, p, automatic, bytes => { mime = bytes }) }
       catch (error) {
         const uncertain = !(error instanceof MailSendError && error.outcome === 'not-applied')
         if (!uncertain) await automatic?.release().catch(() => undefined)
         await scope.notifications?.notify('sendFailed', { sourceEventId: attempt, key: `send:${attempt}`, title: scope.t(uncertain ? 'notification.sendUncertain' : 'notification.sendFailed'), body: p.subject, targetItemId: p.accountId, actions: [{ id: 'open', kind: 'open', label: scope.t('notification.open') }] }).catch(() => false)
         throw error
       }
+      // A generic IMAP server keeps only what the client stores: put the sent copy into its Sent folder. Provider accounts save it themselves.
+      // A failure here never changes the send outcome; the local copy stays until a sync finds the server's copy.
+      const stored = mime && account.provider === 'pureemail' ? await appendSentMessage(scope, account, mime).catch(() => undefined) : undefined
       const sent: CachedMessage = {
         automationHeaders: automationHeaders([...(automatic ? [{ key: 'Auto-Submitted', value: 'auto-generated' }, { key: 'X-Valley-Origin', value: automatic.origin }] : []), ...(p.inReplyTo ? [{ key: 'In-Reply-To', value: p.inReplyTo }, { key: 'References', value: p.inReplyTo }] : [])]),
-        uid: Date.now(),
+        uid: stored?.uid ?? Date.now(),
+        ...(stored?.uidValidity ? { uidValidity: stored.uidValidity } : {}),
         messageId,
         from: account.address,
         to: p.to,
@@ -302,7 +323,7 @@ const methods = {
         flags: ['\\Seen'],
         hasAttachments: false
       }
-      try { await automatic?.complete(); await appendMessage(scope, p.accountId, 'Sent', sent) }
+      try { await automatic?.complete(); await appendMessage(scope, p.accountId, stored?.folder ?? 'Sent', sent) }
       catch { throw new RemoteMailCacheError(scope.t('email.backend.sentCacheFailed'), { messageId }) }
       return { messageId }
     }),
@@ -326,7 +347,8 @@ const methods = {
             payload.folder,
             remote.destinationFolder,
             payload.uid,
-            remote.destinationUid
+            remote.destinationUid,
+            remote.destinationUidValidity
           )
         } else {
           const add = payload.action === 'mark-read'
@@ -353,6 +375,86 @@ const methods = {
     })
 }
 
+/**
+ * A removal of more than ten messages and more than a quarter of the checked cache (an emptied folder included) is applied only
+ * for the UIDs that two consecutive consistent answers both reported missing; smaller removals apply at once.
+ */
+function confirmedRemovals(pending: Map<string, Set<number>>, key: string, removed: number[], checked: number): number[] {
+  if (removed.length <= 10 || removed.length * 4 <= checked) { pending.delete(key); return removed }
+  const earlier = pending.get(key)
+  if (!earlier) { pending.set(key, new Set(removed)); return [] }
+  pending.delete(key)
+  return removed.filter(uid => earlier.has(uid))
+}
+
+/** Characters of a body returned by one loadMessageContent reply. */
+const BODY_SLICE_CHARACTERS = 512 * 1024
+/** Characters of text and HTML the cache stores for one opened message (at most 3 MiB of UTF-8, under the host's 4 MiB data request); a larger body stays in memory for the open message only. */
+const STORED_BODY_CHARACTERS = 1024 * 1024
+const piecesLength = (pieces: string[] | undefined): number => pieces?.reduce((total, piece) => total + piece.length, 0) ?? 0
+function slicePieces(pieces: string[], offset: number, length: number): { total: number; chunk: string } {
+  const parts: string[] = []
+  let total = 0
+  for (const piece of pieces) {
+    if (total + piece.length > offset && total < offset + length) parts.push(piece.slice(Math.max(0, offset - total), Math.min(piece.length, offset + length - total)))
+    total += piece.length
+  }
+  return { total, chunk: parts.join('') }
+}
+const openedRef = { accountId: z.string().min(1), folder: z.string().min(1), uid: z.number().int().positive(), uidValidity: z.number().int().positive().optional() }
+
+async function openedMembership(scope: MailBackendContext, input: { accountId: string; folder: string; uid: number; uidValidity?: number }) {
+  const membership = await scope.data.dataset('folder_messages').get({ accountId: input.accountId, folder: input.folder, uid: input.uid })
+  if (!membership || input.uidValidity !== undefined && membership.uidValidity !== input.uidValidity) throw new MailRefusal('MESSAGE_NOT_FOUND', scope.t('email.selectionMissing'))
+  return membership
+}
+
+async function messageColumns(scope: MailBackendContext, id: string, columns: string[]): Promise<Record<string, unknown> | null> {
+  return (await scope.data.dataset('messages').query({ where: { id }, select: ['id', ...columns], limit: 1 })).rows[0] ?? null
+}
+
+/** UI-only reads that reach the mail server for one opened message; they are not published as commands. */
+const openedMail = {
+  loadMessageContent: mailMethod(z.object({ ...openedRef, field: z.enum(['text', 'html']), offset: z.number().int().min(0) }).strict(), async (scope, input) => {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const membership = await openedMembership(scope, input)
+      const id = String(membership.messageId)
+      const row = await messageColumns(scope, id, ['structure', input.field])
+      if (!row) throw new MailRefusal('MESSAGE_NOT_FOUND', scope.t('email.selectionMissing'))
+      const structure = readStructure(row.structure)
+      const key = JSON.stringify([input.accountId, input.folder, input.uid, membership.uidValidity ?? null, id])
+      const held = structure?.failure ? undefined : scope.opened?.get(key)
+      if (attempt === 2 || held || !structure?.failure && !structure?.deferred?.length) {
+        const pieces = held ? held[input.field] ?? [] : typeof row[input.field] === 'string' ? [row[input.field] as string] : []
+        return { field: input.field, offset: input.offset, ...slicePieces(pieces, input.offset, BODY_SLICE_CHARACTERS) }
+      }
+      const account = await resolveAccount(scope, input.accountId)
+      if (!account) throw new MailRefusal('ACCOUNT_NOT_FOUND', scope.t('email.backend.account'))
+      const epoch = typeof membership.uidValidity === 'number' ? membership.uidValidity : undefined
+      const fetched = await fetchMessageContent(scope, account, input.folder, input.uid, epoch, structure.failure ? undefined : structure.deferred)
+      if (!fetched.message) {
+        if (piecesLength(fetched.text) + piecesLength(fetched.html) <= STORED_BODY_CHARACTERS) await storeOpenedBody(scope, id, { text: fetched.text?.join(''), html: fetched.html?.join('') }, structure)
+        else { scope.opened?.clear(); scope.opened?.set(key, { text: fetched.text, html: fetched.html }) }
+        continue
+      }
+      // A message stored as unavailable is replaced by the downloaded one; its placeholder row goes once nothing holds it.
+      await mergeFolder(scope, input.accountId, input.folder, [fetched.message])
+      if (!(await scope.data.dataset('folder_messages').count({ accountId: input.accountId, messageId: id }))) await scope.data.transaction([{ operation: 'delete', dataset: 'messages', key: { id } }])
+    }
+    throw new MailRefusal('MESSAGE_NOT_FOUND', scope.t('email.selectionMissing'))
+  }),
+  readAttachment: mailMethod(z.object({ ...openedRef, index: z.number().int().min(0).max(10000), offset: z.number().int().min(0) }).strict(), async (scope, input) => {
+    const membership = await openedMembership(scope, input)
+    const row = await messageColumns(scope, String(membership.messageId), ['structure'])
+    const part = readStructure(row?.structure)?.attachments?.[input.index]
+    if (!part) throw new MailRefusal('MESSAGE_NOT_FOUND', scope.t('email.selectionMissing'))
+    const account = await resolveAccount(scope, input.accountId)
+    if (!account) throw new MailRefusal('ACCOUNT_NOT_FOUND', scope.t('email.backend.account'))
+    const bytes = input.offset >= part.encodedSize ? new Uint8Array() : await fetchAttachmentSlice(scope, account, input.folder, input.uid, typeof membership.uidValidity === 'number' ? membership.uidValidity : undefined, part.part, input.offset)
+    return { filename: part.filename, mimeType: part.mimeType, encoding: part.encoding, encodedSize: part.encodedSize, offset: input.offset, data: encodeBytes(bytes) }
+  })
+}
+
 export function register(api: MailBackendApi): () => Promise<void> {
   const backend = api as unknown as PluginBackendApi
   const workflow = backend.schema ? createWorkflowAdapter(backend, { readiness: async (nodeId, context) => {
@@ -369,9 +471,9 @@ export function register(api: MailBackendApi): () => Promise<void> {
   let draining: Promise<void> | undefined
   const scope: MailBackendContext = {
     ...emailStoreContext(api.data), network: api.network, credentials: api.credentials, accounts: api.accounts, services: api.services, t, notifications: api.notifications, settings: api.settings,
-    rpc: { handle: api.rpc.handle, emit: (name, payload) => { if (!disposed) api.rpc.emit(name, payload) } }
+    rpc: { handle: api.rpc.handle, emit: (name, payload) => { if (!disposed) api.rpc.emit(name, payload) } }, removals: new Map(), opened: new Map()
   }
-  const off = Object.entries(methods).map(([name, method]) => {
+  const off = [...Object.entries(methods), ...Object.entries(openedMail)].map(([name, method]) => {
     const handler = async (payload: unknown, operation?: PluginBackendOperationContext) => {
     const parsed = method.schema.safeParse(payload)
     if (!parsed.success) return { ok: false, error: parsed.error.message, code: 'INVALID_INPUT', outcome: 'not-applied' as const }
@@ -396,7 +498,7 @@ export function register(api: MailBackendApi): () => Promise<void> {
         ...(error instanceof MailRefusal ? { code: error.code, outcome: error.outcome } : {}) }
     }
   }
-    const operation = workflow ? workflow.operation(`command.${name}`, handler) : api.rpc.handleOperation?.(`command.${name}`, handler)
+    const operation = !(name in methods) ? undefined : workflow ? workflow.operation(`command.${name}`, handler) : api.rpc.handleOperation?.(`command.${name}`, handler)
     const existingOperation = name === 'queryMessages' ? api.rpc.handleOperation?.(name, handler) : undefined
     const rpc = name === 'queryMessages' && operation ? undefined : api.rpc.handle(name, handler)
     return () => { operation?.(); existingOperation?.(); rpc?.() }

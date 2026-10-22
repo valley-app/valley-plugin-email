@@ -10,6 +10,8 @@ export function createMailMock(options?: Parameters<typeof createMockValleyApi>[
   const mail: EmailDriver = {
     queryMessages: async () => ({ ok: true, data: { messages: [] } }),
     readMessage: async () => ({ ok: true, data: { message: null } }),
+    loadMessageContent: async (input) => ({ ok: true, data: { field: input.field, offset: input.offset, total: 0, chunk: '' } }),
+    readAttachment: async () => ({ ok: false, error: 'No attachment fixture' }),
     parseAddresses: async (value) => ({ ok: true, data: { addresses: parseEmailAddresses(value, true) } }),
     listAccounts: async () => ({ ok: true, data: { accounts: [] } }),
     addSmtpAccount: async () => ({ ok: false, error: 'No account fixture' }),
@@ -29,6 +31,8 @@ export function createMailMock(options?: Parameters<typeof createMockValleyApi>[
       switch (method) {
         case 'queryMessages': return mail.queryMessages(payload as EmailMessageQuery)
         case 'readMessage': return mail.readMessage(payload as EmailMessageRef)
+        case 'loadMessageContent': return mail.loadMessageContent(payload as Parameters<EmailDriver['loadMessageContent']>[0])
+        case 'readAttachment': return mail.readAttachment(payload as Parameters<EmailDriver['readAttachment']>[0])
         case 'parseAddresses': return mail.parseAddresses(String(input.value))
         case 'listAccounts': return mail.listAccounts()
         case 'addSmtpAccount': return mail.addSmtpAccount(payload as EmailSmtpAccountInput)

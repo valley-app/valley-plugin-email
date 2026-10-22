@@ -3,6 +3,7 @@ import { useEmail } from './hooks'
 import { Person } from './People'
 import { MessageActions } from './MessageActions'
 import { MessageBody } from './MessageBody'
+import { Attachments, BodyNote } from './Attachments'
 import { Flag, Mail } from './icons'
 import { uiText } from './localization'
 import { api, React } from './runtime'
@@ -35,6 +36,8 @@ export const Preview: FC = () => {
       {message.cc && <div className="email-preview-meta">Cc {message.addresses.cc.map((address) => <Person key={address.address} address={address} showAddress />)}</div>}
       <div className="email-preview-meta">{new Date(message.date).toLocaleString(api.ui.language())}</div>
       <MessageActions message={message} compact />
+      <Attachments message={message} />
+      <BodyNote message={message} />
       <div className="email-preview-body">{snap.loadingMessage ? <api.ui.ContentLoader label={uiText('auto.33ce417454bf')} compact /> : <MessageBody message={message} />}</div>
     </div>
   )
