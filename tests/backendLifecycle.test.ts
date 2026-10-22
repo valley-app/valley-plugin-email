@@ -10,6 +10,8 @@ import { register, type MailBackendApi } from '../src/backend'
 import { establishFolderEpoch, emailStoreContext, mergeFolder, readFolder, upsertAccount } from '../src/backend/cache'
 import { MAIL_WORK_LIMITS } from '../src/backend/workQueue'
 import * as transport from '../src/backend/transport'
+import { MailRefusal } from '../src/backend/automation'
+import { executeWorkflowOperation } from '../src/backend/workflow'
 import { encodeBytes } from '../src/backend/encoding'
 import { cacheMailboxes } from '../src/backend/query'
 import type { CachedMessage, EmailAccount } from '../src/mailTypes'
@@ -377,6 +379,25 @@ describe('backend account work ownership', () => {
     await dispose
     expect(remote).toHaveBeenCalledTimes(4)
     expect(finished).toBe(true)
+  })
+
+  it('reports a refused message change as not applied and a lost answer as unknown, also to command callers', async () => {
+    const host = await fixture(['a'])
+    const remote = vi.spyOn(transport, 'applyMessageAction')
+    remote.mockRejectedValueOnce(new MailRefusal('ACTION_NOT_APPLIED', 'Not applied. The message was not changed: [READ-ONLY] mailbox is read-only'))
+    const refused = await host.call('applyMessageAction', { accountId: 'a', folder: 'INBOX', uid: 1, action: 'flag' })
+    expect(refused).toEqual({ ok: false, error: 'Not applied. The message was not changed: [READ-ONLY] mailbox is read-only', code: 'ACTION_NOT_APPLIED', outcome: 'not-applied' })
+    remote.mockRejectedValueOnce(new transport.MailActionUncertain('Outcome unknown. The change may have been applied on the server: Mail server closed the connection.'))
+    const lost = await host.call('applyMessageAction', { accountId: 'a', folder: 'INBOX', uid: 1, action: 'flag' })
+    expect(lost).toMatchObject({ ok: false, code: 'ACTION_OUTCOME_UNKNOWN', outcome: 'unknown' })
+    const binding = { method: 'command.applyMessageAction', result: 'driver', wrap: false, effect: 'execute' } as Parameters<typeof executeWorkflowOperation>[0]
+    const context = { cancellation: new AbortController().signal } as unknown as PluginBackendOperationContext
+    const request = { parameters: {}, items: [] } as unknown as Parameters<typeof executeWorkflowOperation>[2]
+    const notApplied = await executeWorkflowOperation(binding, async () => refused, request, context).catch((error: unknown) => error)
+    expect(notApplied).toMatchObject({ code: 'ACTION_NOT_APPLIED' })
+    expect(notApplied).not.toHaveProperty('outcome', 'unknown')
+    expect(await executeWorkflowOperation(binding, async () => lost, request, context).catch((error: unknown) => error)).toMatchObject({ code: 'ACTION_OUTCOME_UNKNOWN', outcome: 'unknown' })
+    await host.dispose()
   })
 
   it('serializes account registration and removal without blocking another account sync', async () => {

@@ -7,6 +7,15 @@ import { uiText } from './localization'
 
 const OPEN = 116
 let openRow: { id: symbol; close(): void } | null = null
+// The last input in each list document: a row pressed or focused right after a pointer press shows no focus ring (the SDK's shared
+// button ring included), keyboard focus does.
+const lastInput = new WeakMap<Document, 'pointer' | 'keyboard'>()
+function trackInput(document: Document): void {
+  if (lastInput.has(document)) return
+  lastInput.set(document, 'keyboard')
+  document.addEventListener('pointerdown', () => lastInput.set(document, 'pointer'), true)
+  document.addEventListener('keydown', () => lastInput.set(document, 'keyboard'), true)
+}
 
 export const SwipeRow: React.FC<{
   message: EmailMessageSummary
@@ -57,6 +66,7 @@ export const SwipeRow: React.FC<{
     element.addEventListener('wheel', wheel, { passive: false })
     return () => { element.removeEventListener('wheel', wheel); clearTimeout(timer) }
   }, [busy, claim, move, settle])
+  React.useEffect(() => { if (root.current) trackInput(root.current.ownerDocument) }, [])
   React.useEffect(() => () => {
     clearTimeout(resetTimer.current)
     if (openRow?.id === id.current) openRow = null
@@ -87,7 +97,8 @@ export const SwipeRow: React.FC<{
       <button className="danger" disabled={offset >= 0 || !canTrash} tabIndex={offset < 0 ? 0 : -1} onClick={() => { void act('trash') }}><Trash /><span>{uiText('auto.e3bf62bb7f5a')}</span></button>
     </div>
     <div className="email-swipe-content" role="button" tabIndex={0} style={{ transform: `translate3d(${offset}px,0,0)` }}
-      onPointerDown={(event) => { if (event.button === 0 && !busy) start.current = { x: event.clientX, y: event.clientY, offset: offsetRef.current, engaged: false } }}
+      onFocus={(event) => { if (lastInput.get(event.currentTarget.ownerDocument) === 'pointer') event.currentTarget.dataset.focusSource = 'pointer'; else delete event.currentTarget.dataset.focusSource }}
+      onPointerDown={(event) => { event.currentTarget.dataset.focusSource = 'pointer'; if (event.button === 0 && !busy) start.current = { x: event.clientX, y: event.clientY, offset: offsetRef.current, engaged: false } }}
       onPointerMove={(event) => {
         const gesture = start.current
         if (!gesture) return
@@ -104,6 +115,7 @@ export const SwipeRow: React.FC<{
       }} onPointerUp={(event) => end(event)} onPointerCancel={(event) => end(event, true)}
       onClick={(event) => { if (suppressClick.current) return; if (offsetRef.current) close(); else onOpen(event) }}
       onKeyDown={(event) => {
+        delete event.currentTarget.dataset.focusSource
         if (event.key === 'Escape') { event.preventDefault(); close() }
         if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); if (offsetRef.current) close(); else onOpen(event as unknown as React.MouseEvent<HTMLDivElement>) }
         if (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10')) {

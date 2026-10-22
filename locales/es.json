@@ -292,6 +292,8 @@
   "email.dataset.assignments": "Asignaciones de categorías de correo",
   "email.dataset.classification_jobs": "Cola de clasificación de correo",
   "email.backend.mailboxChanged": "El buzón cambió en el servidor. Recarga antes de aplicar esta acción.",
+  "email.backend.actionNotApplied": "No aplicado. El mensaje no se modificó: {{reason}}",
+  "email.backend.actionUncertain": "Resultado desconocido. Es posible que el cambio se haya aplicado en el servidor: {{reason}}",
   "notification.newMail": "Correo nuevo",
   "notification.sendFailed": "No se pudo enviar el correo",
   "notification.sendUncertain": "Es posible que el correo se haya enviado",

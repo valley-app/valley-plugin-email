@@ -68,6 +68,7 @@ const CSS = `
 .email-swipe-content:hover .email-message-row { background:color-mix(in srgb,var(--text-color) 6%,var(--container-color)); }
 .email-swipe-row.active .email-message-row { background:color-mix(in srgb,var(--accent-color) 15%,var(--container-color)); }
 .email-swipe-content:focus-visible { outline:2px solid var(--accent-color); outline-offset:-2px; }
+.email-swipe-content[data-focus-source="pointer"]:focus-visible { outline:none; }
 .email-swipe-tray { position:absolute; top:0; bottom:0; width:0; visibility:hidden; pointer-events:none; overflow:hidden; display:flex; }
 .email-swipe-tray.leading { left:0; }
 .email-swipe-tray.trailing { right:0; }

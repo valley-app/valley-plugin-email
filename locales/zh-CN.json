@@ -292,6 +292,8 @@
   "email.dataset.assignments": "邮件分类分配",
   "email.dataset.classification_jobs": "邮件分类队列",
   "email.backend.mailboxChanged": "服务器上的邮箱已更改。请重新加载后再执行此操作。",
+  "email.backend.actionNotApplied": "未应用。邮件未更改：{{reason}}",
+  "email.backend.actionUncertain": "结果未知。更改可能已在服务器上应用：{{reason}}",
   "notification.newMail": "新邮件",
   "notification.sendFailed": "邮件发送失败",
   "notification.sendUncertain": "邮件可能已发送",

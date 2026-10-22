@@ -200,7 +200,7 @@ function emailToolDefinitions(api: ValleyPluginApi): AgentToolDefinition[] {
           uid: Number(args.uid),
           action: action as 'mark-read' | 'mark-unread' | 'flag' | 'unflag' | 'archive' | 'trash'
         })
-        if (!result.ok) throw new Error(result.error ?? uiText('email.agentError.update'))
+        if (!result.ok) throw Object.assign(new Error(result.error ?? uiText('email.agentError.update')), { outcome: result.outcome === 'not-applied' ? 'not-applied' : 'unknown' })
         return json({
           accountId: account.id,
           folder,

@@ -4,7 +4,7 @@ import type { PluginDataApi, PluginBackendApi, PluginBackendOperationContext } f
 import type { EmailAccount, CachedMessage } from '../mailTypes'
 import { cacheMailboxes, cachedMailboxes, parseEmailAddresses, queryMessages, readMessage } from './query'
 import { readAccounts as readEmailAccounts, upsertAccount, getAccount as getEmailAccount, removeAccountFiles, readFolder, mergeFolder, establishFolderEpoch, appendMessage, folderCacheStats, updateMessageFlags, moveCachedMessage, emailStoreContext, captureAccountRestore, restoreAccountFiles, forgetCachedMessage, cachedFolderHeaders, pruneFolder, type EmailStoreContext } from './cache'
-import { accountEndpoint, credentialName, MAIL_CREDENTIAL_STORE, verifyImap, verifySmtp, mailDiagnostic, listFolders, fetchFolder, sendMail, MailSendError, applyMessageAction as applyRemoteMessageAction, type MailTransportApi } from './transport'
+import { accountEndpoint, credentialName, MAIL_CREDENTIAL_STORE, verifyImap, verifySmtp, mailDiagnostic, listFolders, fetchFolder, sendMail, MailSendError, MailActionUncertain, applyMessageAction as applyRemoteMessageAction, type MailTransportApi } from './transport'
 import { createMailWorkQueue } from './workQueue'
 import { automationHeaders, MailRefusal, prepareAutomaticMail, type MailAutomationServices } from './automation'
 import { createWorkflowAdapter } from './workflow'
@@ -393,7 +393,7 @@ export function register(api: MailBackendApi): () => Promise<void> {
       return { ok: false, error: error instanceof Error ? mailDiagnostic(error) : 'Mail operation failed.',
         ...(error instanceof RemoteMailCacheError ? { outcome: 'remote-complete' as const, data: error.result } : {}),
         ...(error instanceof MailSendError ? { code: error.outcome === 'unknown' ? 'SEND_OUTCOME_UNKNOWN' : 'SEND_FAILED', outcome: error.outcome } : {}),
-        ...(error instanceof MailRefusal ? { code: error.code, outcome: error.outcome } : {}) }
+        ...(error instanceof MailRefusal || error instanceof MailActionUncertain ? { code: error.code, outcome: error.outcome } : {}) }
     }
   }
     const operation = workflow ? workflow.operation(`command.${name}`, handler) : api.rpc.handleOperation?.(`command.${name}`, handler)

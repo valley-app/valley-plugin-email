@@ -169,6 +169,9 @@ export interface EmailMessageActionInput {
 }
 
 export interface EmailMessageActionResult extends DriverResult {
+  /** `not-applied`: the mailbox was not changed; `unknown`: the change was sent and its result is unknown; `remote-complete`: applied, cache not updated. */
+  outcome?: 'remote-complete' | 'not-applied' | 'unknown'
+  code?: string
   data?: {
     action: EmailMessageAction
     folder: string

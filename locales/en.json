@@ -292,6 +292,8 @@
   "email.dataset.assignments": "Email category assignments",
   "email.dataset.classification_jobs": "Email classification queue",
   "email.backend.mailboxChanged": "The mailbox changed on the server. Reload before applying this action.",
+  "email.backend.actionNotApplied": "Not applied. The message was not changed: {{reason}}",
+  "email.backend.actionUncertain": "Outcome unknown. The change may have been applied on the server: {{reason}}",
   "notification.newMail": "New mail",
   "notification.sendFailed": "Email could not be sent",
   "notification.sendUncertain": "Email may have been sent",

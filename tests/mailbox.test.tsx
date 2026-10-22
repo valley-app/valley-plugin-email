@@ -1121,3 +1121,89 @@ it('syncs a folder on open only when it was not synced within the last minute', 
     expect(mock.mail.syncFolder).toHaveBeenCalledTimes(3 * perPass)
   } finally { clock.mockRestore() }
 })
+
+describe('Email message actions', () => {
+  const held = () => { let release!: (value: Awaited<ReturnType<ReturnType<typeof createMockValleyApi>['mail']['applyMessageAction']>>) => void; const promise = new Promise<Awaited<ReturnType<ReturnType<typeof createMockValleyApi>['mail']['applyMessageAction']>>>((resolve) => { release = resolve }); return { promise, release } }
+  const listed = () => getStore().getSnapshot().messages.find((entry) => entry.uid === 7)!
+
+  it('removes the unread mark on the first open at once, also while another action is in flight', async () => {
+    const mock = setup()
+    const store = getStore()
+    await store.whenReady
+    await act(async () => { await store.selectAccount('one') })
+    await waitFor(() => expect(listed()).toBeDefined())
+    const flag = held(), read = held()
+    vi.mocked(mock.mail.applyMessageAction).mockImplementationOnce(() => flag.promise).mockImplementationOnce(() => read.promise)
+    let flagged!: Promise<boolean>
+    act(() => { flagged = store.act(message, 'flag') })
+    expect(listed().flags).toContain('\\Flagged')
+    act(() => store.openMessage(message))
+    expect(listed().flags).toContain('\\Seen')
+    expect(mock.mail.applyMessageAction).toHaveBeenCalledTimes(1)
+    await act(async () => { flag.release({ ok: true, data: { action: 'flag', folder: 'INBOX', messages: [{ ...message, flags: ['\\Flagged'] } as never] } }); await flagged })
+    await waitFor(() => expect(mock.mail.applyMessageAction).toHaveBeenCalledTimes(2))
+    expect(mock.mail.applyMessageAction).toHaveBeenLastCalledWith({ accountId: 'one', folder: 'INBOX', uid: 7, action: 'mark-read' })
+    expect(listed().flags).toContain('\\Seen')
+    await act(async () => { read.release({ ok: true, data: { action: 'mark-read', folder: 'INBOX', messages: [] } }) })
+  })
+
+  it.each([
+    ['not-applied', 'Not applied. The message was not changed: [READ-ONLY] mailbox is read-only'],
+    ['unknown', 'Outcome unknown. The change may have been applied on the server: Mail server closed the connection.']
+  ] as const)('shows a flag change at once and reverts it when the outcome is %s', async (outcome, error) => {
+    const mock = setup(Promise.resolve(), { flags: ['\\Seen'] })
+    const store = getStore()
+    await store.whenReady
+    await act(async () => { await store.selectAccount('one') })
+    await waitFor(() => expect(listed()).toBeDefined())
+    const answer = held()
+    vi.mocked(mock.mail.applyMessageAction).mockImplementationOnce(() => answer.promise)
+    let failures: string[] = []
+    let done!: Promise<boolean>
+    act(() => { done = store.act(message, 'flag', { onFailure: (value) => { failures = [...failures, value] } }) })
+    expect(listed().flags).toEqual(['\\Seen', '\\Flagged'])
+    await act(async () => { answer.release({ ok: false, error, code: outcome === 'unknown' ? 'ACTION_OUTCOME_UNKNOWN' : 'ACTION_NOT_APPLIED', outcome }) })
+    expect(await done).toBe(false)
+    expect(listed().flags).toEqual(['\\Seen'])
+    expect(failures).toEqual([outcome])
+    expect(store.getSnapshot().error).toBe(error)
+  })
+
+  it('marks a property edit refused by the server as not applied for its command caller', async () => {
+    const registered: Array<{ id: string; input?: { parse(raw: unknown): unknown }; run(input: unknown): Promise<unknown> }> = []
+    const mock = setup(Promise.resolve(), { flags: ['\\Seen'] }, (current) => {
+      const register = current.api.commands.register
+      vi.spyOn(current.api.commands, 'register').mockImplementation((command) => { registered.push(command as unknown as typeof registered[number]); return register(command) })
+    })
+    const store = getStore()
+    await store.restoreSelection({ accountIds: ['one'], view: 'folder', folder: 'INBOX', message: { accountId: 'one', folder: 'INBOX', uid: 7 } })
+    const surface = mock.api.interop.extensions.providers(PLUGIN_SURFACE_V1)[0].extension.getSnapshot()!
+    const subject = { pluginId: 'email', surface: 'main_workspace' as const, view: surface.view, item: surface.item }
+    const command = registered.find((entry) => entry.id === 'update-properties')!
+    vi.mocked(mock.mail.applyMessageAction).mockResolvedValueOnce({ ok: false, error: 'Not applied. The message was not changed: [READ-ONLY] mailbox is read-only', code: 'ACTION_NOT_APPLIED', outcome: 'not-applied' })
+    await act(async () => { await expect(command.run(command.input!.parse({ subject, values: { flagged: true } }))).rejects.toMatchObject({ outcome: 'not-applied' }) })
+    vi.mocked(mock.mail.applyMessageAction).mockResolvedValueOnce({ ok: false, error: 'Outcome unknown. The change may have been applied on the server: Mail server closed the connection.', code: 'ACTION_OUTCOME_UNKNOWN', outcome: 'unknown' })
+    await act(async () => { await expect(command.run(command.input!.parse({ subject, values: { flagged: true } }))).rejects.toMatchObject({ outcome: 'unknown' }) })
+  })
+
+  it('shows no focus ring on a row focused by a pointer press and keeps it for keyboard focus', async () => {
+    const mock = setup()
+    mock.mail.queryMessages = async () => ({ ok: true, data: { messages: [message, { ...message, id: 'moss', uid: 8, subject: 'Moss survey' }] } })
+    const { container } = render(<Panel />)
+    await screen.findByText('Moss survey')
+    const rows = [...container.querySelectorAll<HTMLElement>('.email-swipe-content')]
+    fireEvent.keyDown(rows[1], { key: 'Tab' })
+    fireEvent.pointerDown(rows[0], { button: 0, clientX: 20, clientY: 20 })
+    act(() => rows[0].focus())
+    expect(rows[0].dataset.focusSource).toBe('pointer')
+    fireEvent.keyDown(rows[0], { key: 'ArrowDown' })
+    expect(rows[0].dataset.focusSource).toBeUndefined()
+    act(() => rows[1].focus())
+    expect(rows[1].dataset.focusSource).toBeUndefined()
+    fireEvent.pointerDown(rows[1], { button: 0, clientX: 20, clientY: 120 })
+    expect(rows[1].dataset.focusSource).toBe('pointer')
+    const css = [...document.querySelectorAll('style')].map((style) => style.textContent).join('\n')
+    expect(css).toContain('.email-swipe-content[data-focus-source="pointer"]:focus-visible { outline:none; }')
+    expect(css).toContain('.email-swipe-content:focus-visible { outline:2px solid var(--accent-color); outline-offset:-2px; }')
+  })
+})
