@@ -50,7 +50,8 @@ export function createDraftController(api: ValleyPluginApi, ports: DraftPorts, r
     if (!current()) return
     draftSequence = Math.max(draftSequence, local?.id ?? 0, saved?.draft.id ?? 0)
     if (!local && saved) {
-      ports.set({ compose: saved.draft, composing: true })
+      // A saved draft loads closed; the Email tab that showed it opens it again (tabs.ts).
+      ports.set({ compose: saved.draft })
       ports.updateTitle()
       void ports.resolveContacts()
     }

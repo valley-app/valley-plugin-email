@@ -10,6 +10,17 @@ import { uiText } from './localization'
 type RecipientKind = 'to' | 'cc' | 'bcc'
 const kindLabel = (kind: RecipientKind): string => kind === 'to' ? uiText('auto.ae79ea1e9c63') : kind === 'cc' ? 'Cc' : 'Bcc'
 
+/**
+ * Compose fields are uncontrolled: a controlled field gets its value (and, for a textarea, its text) rewritten on every
+ * keystroke, which ends the browser's typing undo group, so Cmd+Z would remove one character at a time. The store's value
+ * is written to the field only when it changed from outside (another draft, a reply, a revert, a cleared recipient query).
+ */
+function useStoreValue<T extends HTMLInputElement | HTMLTextAreaElement>(value: string): React.RefObject<T> {
+  const field = React.useRef<T>(null)
+  React.useLayoutEffect(() => { if (field.current && field.current.value !== value) field.current.value = value })
+  return field
+}
+
 function RecipientPicker({ kind, close }: { kind: RecipientKind; close(): void }): React.ReactElement {
   const { store, snap } = useEmail()
   const draft = snap.compose
@@ -20,6 +31,7 @@ function RecipientPicker({ kind, close }: { kind: RecipientKind; close(): void }
   const [revision, setRevision] = React.useState(0)
   const [parsing, setParsing] = React.useState(false)
   const listId = React.useId()
+  const field = useStoreValue<HTMLInputElement>(query)
   React.useEffect(() => {
     const refresh = (): void => setRevision((value) => value + 1)
     const offService = api.interop.services.subscribe(CONTACTS_DIRECTORY_V1, refresh)
@@ -61,8 +73,8 @@ function RecipientPicker({ kind, close }: { kind: RecipientKind; close(): void }
   }
   return <div className="email-recipient-popover">
     <div className="email-popover-label">{kindLabel(kind)}</div>
-    <label className="email-search search-field"><Search className="search-field-icon" /><input className="search-field-input" autoFocus role="combobox" aria-label={uiText('email.recipientSearch')} aria-expanded={results.length > 0}
-      aria-controls={listId} aria-activedescendant={results.length ? `${listId}-${active}` : undefined} autoComplete="off" value={query}
+    <label className="email-search search-field"><Search className="search-field-icon" /><input ref={field} className="search-field-input" autoFocus role="combobox" aria-label={uiText('email.recipientSearch')} aria-expanded={results.length > 0}
+      aria-controls={listId} aria-activedescendant={results.length ? `${listId}-${active}` : undefined} autoComplete="off"
       placeholder={uiText('email.recipientSearch')} disabled={parsing || snap.sending}
       onChange={(event) => { if (draft) store.updateDraft({ pending: { ...draft.pending, [kind]: event.target.value } }); setError('') }}
       onPaste={(event) => {
@@ -105,6 +117,8 @@ export const Compose: React.FC = () => {
   const showCcBcc = expandedRecipients || draft.cc.length > 0 || draft.bcc.length > 0 || Boolean(draft.pending.cc || draft.pending.bcc)
   const sender = snap.accounts.find((account) => account.id === draft.accountId)
   const SelectField = api.ui.settings.SelectField
+  const subject = useStoreValue<HTMLInputElement>(draft.subject)
+  const body = useStoreValue<HTMLTextAreaElement>(draft.text)
   return <div className="email-form">
     <header className="email-compose-header"><h2>{uiText(draft.mode === 'reply-all' ? 'email.replyAll' : draft.mode === 'reply' ? 'auto.6c2bb735a46a' : draft.mode === 'forward' ? 'auto.ba4e72261283' : 'auto.1ed2e7b50fa1')}</h2>
       <div className="email-form-actions"><button className="email-btn primary" disabled={snap.sending || !sender || !draft.to.length || Object.values(draft.pending).some((value) => value.trim())} onClick={() => { void store.send() }}>
@@ -119,7 +133,7 @@ export const Compose: React.FC = () => {
     {!sender && <div role="alert">{uiText('email.senderUnavailable')}</div>}
     <RecipientField kind="to" />
     {showCcBcc ? <><RecipientField kind="cc" /><RecipientField kind="bcc" /></> : <button className="email-reveal-recipients" aria-expanded={false} onClick={() => setExpandedRecipients(true)}>{uiText('email.showCcBcc')}</button>}
-    <label className="email-compose-subject"><span className="email-field-label">{uiText('auto.8d183dbdcea3')}</span><input value={draft.subject} disabled={snap.sending} onChange={(event) => store.updateDraft({ subject: event.target.value })} /></label>
-    <textarea className="email-compose-body" aria-label={uiText('auto.68f4145fee7d')} value={draft.text} disabled={snap.sending} onChange={(event) => store.updateDraft({ text: event.target.value })} />
+    <label className="email-compose-subject"><span className="email-field-label">{uiText('auto.8d183dbdcea3')}</span><input ref={subject} disabled={snap.sending} onChange={(event) => store.updateDraft({ subject: event.target.value })} /></label>
+    <textarea ref={body} className="email-compose-body" aria-label={uiText('auto.68f4145fee7d')} disabled={snap.sending} onChange={(event) => store.updateDraft({ text: event.target.value })} />
   </div>
 }

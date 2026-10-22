@@ -53,7 +53,7 @@ describe('durable Email drafts', () => {
     await first.dispose()
     const next = setup(first.datasets.get('email.drafts'))
     await next.store.whenReady
-    expect(next.store.getSnapshot()).toMatchObject({ compose: expected, composing: true })
+    expect(next.store.getSnapshot()).toMatchObject({ compose: expected, composing: false })
     expect(next.api.runtime).not.toBe(first.api.runtime)
   })
 

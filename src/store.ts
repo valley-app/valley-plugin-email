@@ -16,7 +16,7 @@ export { messageKey } from './messageController'
 import type { EmailAddress, EmailFilters, EmailGroupRef, EmailMailboxView, EmailMessageAction, EmailMessageDetail, EmailMessageRef, EmailMessageSummary } from './mailTypes'
 import { api } from './runtime'
 import { uiText } from './localization'
-import { focusedTabInstance } from './tabs'
+import { COMPOSE_TAB_SETTING, focusedTabInstance } from './tabs'
 
 export interface ComposeDraft {
   id: number
@@ -108,6 +108,8 @@ export interface EmailStore {
   restoreSelection(selection: EmailSelection): Promise<boolean>
   captureNavigation(): EmailNavigation
   restoreNavigation(saved: EmailNavigation): Promise<void>
+  /** Show or hide the current draft in the live mailbox's tab without changing the draft. */
+  setComposing(composing: boolean): void
 }
 
 export interface EmailSelection {
@@ -141,7 +143,7 @@ function createStore(api: ValleyPluginApi): EmailStore {
     loading: true, loadingMessages: false, loadingMessage: false, accounts: [], selectedAccountId: null, selectedAccountIds: [],
     folders: [], mailboxes: [], mailboxesByAccount: {}, selectedFolder: 'INBOX', view: 'folder', group: null, messages: [],
     selectedUid: null, selectedMessage: null, syncing: false, actionUid: null, error: null, query: '',
-    compose: drafts.draft, composing: Boolean(drafts.draft), bodyOverride: null, sending: false, contacts: {}, canGoBack: false, canGoForward: false
+    compose: drafts.draft, composing: Boolean(drafts.draft && drafts.composing), bodyOverride: null, sending: false, contacts: {}, canGoBack: false, canGoForward: false
   }
   const listeners = new Set<() => void>()
   const set = (patch: Partial<EmailSnapshot>): void => {
@@ -150,6 +152,7 @@ function createStore(api: ValleyPluginApi): EmailStore {
     state = { ...state, ...patch, ...mailboxController.historyState() }
     if (accountsChanged) void smartGroups.reload().catch(() => {})
     drafts.draft = state.compose
+    drafts.composing = state.composing
     for (const listener of listeners) listener()
   }
   const activeAccountIds = (): string[] => state.selectedAccountIds.length ? state.selectedAccountIds : state.accounts.map((account) => account.id)
@@ -215,7 +218,15 @@ function createStore(api: ValleyPluginApi): EmailStore {
       if (state.syncing) syncController.recordRefresh(key, refresh)
     }
   })
-  const offSettings = api.settings.subscribe(() => set({ bodyOverride: null }))
+  // Remembering the compose tab is not a display change and keeps the per-message plain text/HTML choice.
+  const displaySettings = (): string => JSON.stringify({ ...api.settings.get(), [COMPOSE_TAB_SETTING]: undefined })
+  let displayed = displaySettings()
+  const offSettings = api.settings.subscribe(() => {
+    const next = displaySettings()
+    if (next === displayed) return
+    displayed = next
+    set({ bodyOverride: null })
+  })
   const whenReady = Promise.all([refreshAccounts(), draftController.whenReady]).then(() => {})
   void whenReady.finally(accountsLoaded).catch(() => {})
   return {
@@ -251,7 +262,12 @@ function createStore(api: ValleyPluginApi): EmailStore {
       if (!result.ok) { report(result.error || uiText('email.actionFailed')); return }
       await refreshAccounts()
     },
-    goBack, goForward, restoreSelection, captureNavigation, restoreNavigation
+    goBack, goForward, restoreSelection, captureNavigation, restoreNavigation,
+    setComposing: (composing) => {
+      if (disposed || state.composing === composing || composing && !state.compose) return
+      set({ composing })
+      updateTitle()
+    }
   }
 }
 

@@ -16,6 +16,8 @@ type StoredDraft = z.infer<typeof recordSchema>
 export interface RetainedDraft {
   draft: ComposeDraft | null
   revision?: number
+  /** Whether the focused Email tab showed the draft when the store was last disposed in this window. */
+  composing?: boolean
 }
 
 export function createDraftRepository(api: ValleyPluginApi, retained: RetainedDraft) {
