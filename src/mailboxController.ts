@@ -1,4 +1,4 @@
-import type { EmailDriver, EmailMailboxView, EmailMessageDetail, EmailMessageRef } from './mailTypes'
+import type { EmailDriver, EmailGroupRef, EmailMailboxView, EmailMessageDetail, EmailMessageRef } from './mailTypes'
 import type { EmailSelection, EmailSnapshot } from './store'
 import type { createAccountsController } from './accountsController'
 import { loadDeferredBody, messageKey, type createMessageController } from './messageController'
@@ -15,7 +15,7 @@ interface MailboxPorts {
   messages: ReturnType<typeof createMessageController>
 }
 
-type NavigationEntry = { accountId: string | null; accountIds: string[]; folder: string; view: EmailMailboxView; message: EmailMessageRef | null }
+type NavigationEntry = { accountId: string | null; accountIds: string[]; folder: string; view: EmailMailboxView; message: EmailMessageRef | null; group?: EmailGroupRef }
 /** What open-selection replaces, so its revert can put the exact selection and history back. */
 export interface EmailNavigation { selection: EmailSelection; history: NavigationEntry[]; historyIndex: number; composing: boolean; error: string | null }
 
@@ -26,17 +26,17 @@ export function createMailboxController(mail: EmailDriver, ports: MailboxPorts) 
   const pushHistory = (): void => {
     const state = ports.snapshot()
     const entry: NavigationEntry = { accountId: state.selectedAccountId, accountIds: state.selectedAccountIds, folder: state.selectedFolder, view: state.view,
-      message: state.selectedMessage ? { accountId: state.selectedMessage.accountId, folder: state.selectedMessage.folder, uid: state.selectedMessage.uid } : null }
+      message: state.selectedMessage ? { accountId: state.selectedMessage.accountId, folder: state.selectedMessage.folder, uid: state.selectedMessage.uid } : null, ...(state.group ? { group: state.group } : {}) }
     if (JSON.stringify(entry) === JSON.stringify(history[historyIndex])) return
     history = [...history.slice(0, historyIndex + 1), entry].slice(-30)
     historyIndex = history.length - 1
     ports.set({})
   }
-  async function selectView(view: EmailMailboxView, folder = ports.snapshot().selectedFolder): Promise<void> {
+  async function selectView(view: EmailMailboxView, folder = ports.snapshot().selectedFolder, group: EmailGroupRef | null = null): Promise<void> {
     if (!ports.active()) return
     ports.messages.invalidateDetail()
     clearTimeout(queryTimer)
-    ports.set({ view, selectedFolder: folder, query: '', selectedMessage: null, selectedUid: null,
+    ports.set({ view, group, selectedFolder: folder, query: '', selectedMessage: null, selectedUid: null,
       loadingMessage: false, messages: [], cursor: undefined, error: null })
     ports.updateTitle()
     pushHistory()
@@ -60,7 +60,7 @@ export function createMailboxController(mail: EmailDriver, ports: MailboxPorts) 
     const next = historyIndex + delta
     if (next < 0 || next >= history.length) return false
     const entry = history[next]
-    if (!await restoreSelection({ accountIds: entry.accountIds, folder: entry.folder, view: entry.view, ...(entry.message ? { message: entry.message } : {}) }, false)) return false
+    if (!await restoreSelection({ accountIds: entry.accountIds, folder: entry.folder, view: entry.view, ...(entry.message ? { message: entry.message } : {}), ...(entry.group ? { group: entry.group } : {}) }, false)) return false
     historyIndex = next
     ports.set({})
     return true
@@ -98,7 +98,7 @@ export function createMailboxController(mail: EmailDriver, ports: MailboxPorts) 
     }
     if (generation !== ports.messages.selectionVersion() || !ports.active()) return false
     clearTimeout(queryTimer)
-    ports.set({ selectedAccountIds: selection.accountIds, selectedAccountId: requested[0], view: selection.view, selectedFolder: selection.folder, query: selection.query ?? '',
+    ports.set({ selectedAccountIds: selection.accountIds, selectedAccountId: requested[0], view: selection.view, group: selection.group ?? null, selectedFolder: selection.folder, query: selection.query ?? '',
       selectedMessage: message, selectedUid: message?.uid ?? null, bodyOverride: null, loadingMessage: false, composing: false, messages: [], cursor: undefined, error: null })
     const loaded = ports.messages.loadMessages()
     const refreshed = ports.accounts.refreshFolders(requested, folders)
@@ -112,7 +112,7 @@ export function createMailboxController(mail: EmailDriver, ports: MailboxPorts) 
   }
   function captureNavigation(): EmailNavigation {
     const state = ports.snapshot(), message = state.selectedMessage
-    return { selection: { accountIds: [...state.selectedAccountIds], view: state.view, folder: state.selectedFolder, query: state.query, ...(message ? { message: { accountId: message.accountId, folder: message.folder, uid: message.uid } } : {}) },
+    return { selection: { accountIds: [...state.selectedAccountIds], view: state.view, folder: state.selectedFolder, query: state.query, ...(message ? { message: { accountId: message.accountId, folder: message.folder, uid: message.uid } } : {}), ...(state.group ? { group: state.group } : {}) },
       history: [...history], historyIndex, composing: state.composing, error: state.error }
   }
   async function restoreNavigation(saved: EmailNavigation): Promise<void> {

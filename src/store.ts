@@ -5,7 +5,7 @@ import { createContactResolution } from './contactResolution'
 import { createEmailProjections } from './projections'
 import { createClassificationQueue, type ClassificationProgress } from './classificationQueue'
 import { vipAddresses } from './grouping'
-import { createSmartGroupsStore, groupFilter, noGroupFilter, starterGroups, type SmartGroupsStore } from './smartGroups'
+import { createSmartGroupsStore, groupFilter, starterGroups, type SmartGroupsStore } from './smartGroups'
 import { createSyncController } from './syncController'
 import { createAccountsController } from './accountsController'
 import { createDraftController } from './draftController'
@@ -13,7 +13,7 @@ import type { RetainedDraft } from './draftRepository'
 import { createMessageController, messageKey, type EmailActionOptions } from './messageController'
 import { createMailboxController, type EmailNavigation } from './mailboxController'
 export { messageKey } from './messageController'
-import type { EmailAddress, EmailFilters, EmailMailboxView, EmailMessageAction, EmailMessageDetail, EmailMessageRef, EmailMessageSummary } from './mailTypes'
+import type { EmailAddress, EmailFilters, EmailGroupRef, EmailMailboxView, EmailMessageAction, EmailMessageDetail, EmailMessageRef, EmailMessageSummary } from './mailTypes'
 import { api } from './runtime'
 import { uiText } from './localization'
 import { focusedTabInstance } from './tabs'
@@ -46,6 +46,8 @@ export interface EmailSnapshot {
   mailboxesByAccount: Record<string, EmailMailbox[]>
   selectedFolder: string
   view: EmailMailboxView
+  /** The smart group this tab shows (with the Recent view), or null. */
+  group: EmailGroupRef | null
   messages: EmailMessageSummary[]
   cursor?: string
   selectedUid: number | null
@@ -84,8 +86,8 @@ export interface EmailStore {
   dismissError(): void
   setQuery(query: string): void
   setFilters(filters: EmailFilters): void
-  /** Opens a smart group (and its subgroups) of one account in the Recent view; `null` clears the group filter. */
-  selectGroup(accountId: string | null, groupId?: string): Promise<void>
+  /** Opens a smart group (and its subgroups) of one account in the Recent view of this tab, like a folder. */
+  selectGroup(accountId: string, groupId: string): Promise<void>
   toggleVip(address: EmailAddress): Promise<void>
   assignCategory(id: string, categoryId: string | null): Promise<void>
   resetCategory(id: string): Promise<void>
@@ -114,6 +116,7 @@ export interface EmailSelection {
   folder: string
   query?: string
   message?: EmailMessageRef
+  group?: EmailGroupRef
 }
 
 export function formatEmailTimestamp(value: string, dateFormat: string, timeFormat: '24h' | '12h', language: string, includeTime = false): string {
@@ -136,7 +139,7 @@ function createStore(api: ValleyPluginApi): EmailStore {
   let state: EmailSnapshot = {
     filters: (api.settings.get().filters as EmailFilters | undefined) ?? {}, classification: { pending: 0, completed: 0, failed: 0 },
     loading: true, loadingMessages: false, loadingMessage: false, accounts: [], selectedAccountId: null, selectedAccountIds: [],
-    folders: [], mailboxes: [], mailboxesByAccount: {}, selectedFolder: 'INBOX', view: 'folder', messages: [],
+    folders: [], mailboxes: [], mailboxesByAccount: {}, selectedFolder: 'INBOX', view: 'folder', group: null, messages: [],
     selectedUid: null, selectedMessage: null, syncing: false, actionUid: null, error: null, query: '',
     compose: drafts.draft, composing: Boolean(drafts.draft), bodyOverride: null, sending: false, contacts: {}, canGoBack: false, canGoForward: false
   }
@@ -160,7 +163,8 @@ function createStore(api: ValleyPluginApi): EmailStore {
   const report = (error: unknown): void => set({ error: error instanceof Error ? error.message : String(error) })
   const messagesController = createMessageController(mail, {
     snapshot: () => state, active: () => !disposed, activeAccountIds, set, report, updateTitle, pushHistory: () => mailboxController.pushHistory(), resolveContacts,
-    removeFromHistory: (key) => mailboxController.removeFromHistory(key)
+    removeFromHistory: (key) => mailboxController.removeFromHistory(key),
+    groupFilters: () => { const value = state.group ? groupFilter(smartGroups.get(), state.group.accountId, state.group.groupId) : {}; return value.categoryIds ? value : {} }
   })
   const { loadMessages, openMessage, act } = messagesController
   const accountsController = createAccountsController(api, {
@@ -230,14 +234,7 @@ function createStore(api: ValleyPluginApi): EmailStore {
     openMessage, sync, syncIfStale, act, setPlainText: (message, htmlContent, plainText) => set({ bodyOverride: { key: messageKey(message), htmlContent, plainText } }), dismissError: () => set({ error: null }),
     setQuery,
     setFilters: filters => { messagesController.invalidateMessages(); set({ filters, messages: [], cursor: undefined }); void api.settings.set('filters', filters).catch(report); void loadMessages() },
-    selectGroup: async (accountId, groupId) => {
-      if (!(accountId && groupId) && !state.filters.categoryAccountId) return
-      const filters = { ...state.filters, ...(accountId && groupId ? groupFilter(smartGroups.get(), accountId, groupId) : noGroupFilter) }
-      messagesController.invalidateMessages()
-      set({ filters })
-      void api.settings.set('filters', filters).catch(report)
-      if (accountId && groupId) await selectView('recent')
-    },
+    selectGroup: (accountId, groupId) => selectView('recent', state.selectedFolder, { accountId, groupId }),
     toggleVip: async address => {
       const values = vipAddresses(api), key = address.address.trim().toLowerCase()
       const matched = state.contacts[key]

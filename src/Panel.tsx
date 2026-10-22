@@ -88,7 +88,7 @@ const GroupOptions: React.FC<{ close(): void }> = ({ close }) => {
     {accounts.map((account) => <div key={account.id} role="group" aria-label={account.displayName || account.address}>
       {accounts.length > 1 && <div className="email-popover-sublabel">{account.displayName || account.address}</div>}
       {flattenGroups(config.accounts[account.id].groups).map((entry) => {
-        const active = snap.view === 'recent' && snap.filters.categoryAccountId === account.id && snap.filters.categoryId === entry.group.id
+        const active = snap.group?.accountId === account.id && snap.group.groupId === entry.group.id
         const count = descendantIds(entry.group).reduce((sum, id) => sum + (counts[account.id]?.[id] ?? 0), 0)
         return <button key={entry.group.id} role="menuitemradio" aria-checked={active} className={`email-account-option email-group-option${active ? ' selected' : ''}`} style={{ paddingInlineStart: 8 + entry.depth * 16 }}
           onClick={() => { void store.selectGroup(account.id, entry.group.id); close() }}>
@@ -101,18 +101,18 @@ const GroupOptions: React.FC<{ close(): void }> = ({ close }) => {
 
 export const FolderPopover: React.FC<{ close(): void }> = ({ close }) => {
   const { store, snap } = useEmail()
-  const grouped = Boolean(snap.filters.categoryAccountId && snap.filters.categoryId)
+  const grouped = Boolean(snap.group)
   return <div className="email-account-popover">
     <div className="email-popover-label">{uiText('email.mailboxes')}</div>
     {smartViews.map(({ view, Icon }) => <button key={view} role="menuitemradio" aria-checked={snap.view === view && !grouped}
-      className={`email-account-option${snap.view === view && !grouped ? ' selected' : ''}`} onClick={() => { void store.selectGroup(null).then(() => store.selectView(view)); close() }}>
+      className={`email-account-option${snap.view === view && !grouped ? ' selected' : ''}`} onClick={() => { void store.selectView(view); close() }}>
       <span className="email-account-check">{snap.view === view && !grouped ? '✓' : ''}</span><Icon /><span>{uiText(`email.view.${view}`)}</span>
     </button>)}
     <div className="email-popover-separator" /><div className="email-popover-label">{uiText('auto.19adc47be34b')}</div>
     {snap.mailboxes.map((mailbox) => {
       const active = snap.view === 'folder' && snap.selectedFolder === mailbox.path
       return <button key={mailbox.path} role="menuitemradio" aria-checked={active} className={`email-account-option${active ? ' selected' : ''}`}
-        onClick={() => { void store.selectGroup(null).then(() => store.selectFolder(mailbox.path)); close() }}>
+        onClick={() => { void store.selectFolder(mailbox.path); close() }}>
         <span className="email-account-check">{active ? '✓' : ''}</span><FolderIcon mailbox={mailbox} />
         <span className="email-row-label">{folderLabel(mailbox)}</span>{mailbox.cachedUnread > 0 && <small>{mailbox.cachedUnread}</small>}
       </button>
@@ -134,7 +134,7 @@ export const MailboxControls: React.FC<{ compact?: boolean }> = ({ compact = fal
   const account = snap.accounts.find((candidate) => candidate.id === snap.selectedAccountId)
   const mailbox = snap.mailboxes.find((candidate) => candidate.path === snap.selectedFolder)
   const config = useSmartGroups()
-  const group = snap.view === 'recent' && snap.filters.categoryAccountId && snap.filters.categoryId ? findGroupPath(config.accounts[snap.filters.categoryAccountId]?.groups ?? [], snap.filters.categoryId) : undefined
+  const group = snap.group ? findGroupPath(config.accounts[snap.group.accountId]?.groups ?? [], snap.group.groupId) : undefined
   const label = group ? group.map((item) => item.name || '…').join(' / ') : snap.view === 'folder' ? mailbox ? folderLabel(mailbox) : snap.selectedFolder : uiText(`email.view.${snap.view}`)
   const accountLabel = snap.selectedAccountIds.length === 0 || snap.selectedAccountIds.length === snap.accounts.length ? uiText('email.allAccounts')
     : snap.selectedAccountIds.length === 1 ? account?.displayName || account?.address

@@ -1,7 +1,7 @@
 import { commandRegistrar, emailResults } from './commandResults'
 import { mailApi } from './mailApi'
 import { METADATA_PANEL_SEGMENT_V1, provideBookmarkSurface, type PluginInspectionSubject, type PluginProperty, type PluginSurfaceSnapshot, type ValleyPluginApi } from '@valley/plugin-sdk'
-import type { EmailMessageDetail, EmailMessageRef } from './mailTypes'
+import type { EmailGroupRef, EmailMessageDetail, EmailMessageRef } from './mailTypes'
 import type { PluginLinkState } from '@valley/plugin-sdk/paths'
 import { api, React } from './runtime'
 import { formatEmailTimestamp, getStore, messageKey, type EmailSelection, type EmailSnapshot } from './store'
@@ -68,6 +68,22 @@ const bookmarkStateSchema = {
         "uid"
       ],
       "additionalProperties": false
+    },
+    "group": {
+      "type": "object",
+      "properties": {
+        "accountId": {
+          "type": "string"
+        },
+        "groupId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "accountId",
+        "groupId"
+      ],
+      "additionalProperties": false
     }
   },
   "required": [
@@ -97,18 +113,24 @@ function selection(raw: unknown): EmailSelection {
     if (!ref || typeof ref.accountId !== 'string' || typeof ref.folder !== 'string' || !ref.accountId || !ref.folder || !Number.isSafeInteger(ref.uid) || Number(ref.uid) < 1) throw new Error(uiText('email.error.messageFields'))
     message = { accountId: ref.accountId, folder: ref.folder, uid: ref.uid! }
   }
-  return { accountIds, view: view as EmailSelection['view'], folder, query: typeof value.query === 'string' ? value.query : '', ...(message ? { message } : {}) }
+  let group: EmailGroupRef | undefined
+  if (value.group !== undefined) {
+    const ref = value.group as Partial<EmailGroupRef> | null
+    if (!ref || typeof ref.accountId !== 'string' || typeof ref.groupId !== 'string' || !ref.accountId || !ref.groupId || ref.groupId.length > 200) throw new Error(uiText('email.error.input'))
+    group = { accountId: ref.accountId, groupId: ref.groupId }
+  }
+  return { accountIds, view: view as EmailSelection['view'], folder, query: typeof value.query === 'string' ? value.query : '', ...(message ? { message } : {}), ...(group ? { group } : {}) }
 }
 
 const targetOf = (subject?: PluginInspectionSubject): EmailSelection => selection(subject?.item?.state ?? subject?.view ?? {})
 const parkedSnapshot = ({ selection: parked, title }: ParkedEmailTab): PluginSurfaceSnapshot => {
-  const view: PluginLinkState = { accountIds: [...parked.accountIds], view: parked.view, folder: parked.folder, query: parked.query ?? '' }
+  const view: PluginLinkState = { accountIds: [...parked.accountIds], view: parked.view, folder: parked.folder, query: parked.query ?? '', ...(parked.group ? { group: { ...parked.group } } : {}) }
   return { title: title || uiText('manifest.name'), view,
     ...(parked.message ? { item: { id: messageKey(parked.message), title: title || uiText('email.noSubject'), state: { ...view, message: { accountId: parked.message.accountId, folder: parked.message.folder, uid: parked.message.uid } } } } : {}) }
 }
 const viewState = (): PluginLinkState => {
   const snap = getStore().getSnapshot()
-  return { accountIds: [...snap.selectedAccountIds], view: snap.view, folder: snap.selectedFolder, query: snap.query }
+  return { accountIds: [...snap.selectedAccountIds], view: snap.view, folder: snap.selectedFolder, query: snap.query, ...(snap.group ? { group: { ...snap.group } } : {}) }
 }
 
 async function readMessage(ref: EmailMessageRef): Promise<EmailMessageDetail> {

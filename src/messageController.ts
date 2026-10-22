@@ -1,4 +1,4 @@
-import type { EmailDriver, EmailMessageAction, EmailMessageDetail, EmailMessageRef } from './mailTypes'
+import type { EmailDriver, EmailFilters, EmailMessageAction, EmailMessageDetail, EmailMessageRef } from './mailTypes'
 import type { EmailSnapshot } from './store'
 import { uiText } from './localization'
 
@@ -12,6 +12,8 @@ interface MessagePorts {
   pushHistory(): void
   removeFromHistory(key: string): void
   resolveContacts(): Promise<void>
+  /** The open smart group's query filter for this tab (empty when none); kept out of the saved global filters. */
+  groupFilters?(): EmailFilters
 }
 
 export const messageKey = (message: EmailMessageRef): string => JSON.stringify([message.accountId, message.folder, message.uid])
@@ -91,7 +93,7 @@ export function createMessageController(mail: EmailDriver, ports: MessagePorts) 
     if (patch.messages || patch.selectedMessage) ports.set(patch)
   }
   const messageQuery = (append = false) => ({ accountId: ports.snapshot().selectedAccountId!, view: ports.snapshot().view, folder: ports.snapshot().selectedFolder,
-    accountIds: ports.activeAccountIds(), filters: ports.snapshot().filters, query: ports.snapshot().query, cursor: append ? ports.snapshot().cursor : undefined })
+    accountIds: ports.activeAccountIds(), filters: { ...ports.snapshot().filters, ...ports.groupFilters?.() }, query: ports.snapshot().query, cursor: append ? ports.snapshot().cursor : undefined })
   function loadMessages(append = false): Promise<void> {
     const accountIds = ports.activeAccountIds()
     if (!ports.active() || !ports.snapshot().selectedAccountId || !accountIds.length || (append && (!ports.snapshot().cursor || ports.snapshot().loadingMessages))) return Promise.resolve()

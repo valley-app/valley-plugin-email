@@ -154,6 +154,8 @@ export interface EmailMessageRef {
 }
 
 export type EmailMailboxView = 'recent' | 'unread' | 'flagged' | 'folder'
+/** A smart group opened like a folder; part of each tab's own view, never of the global filters. */
+export interface EmailGroupRef { accountId: string; groupId: string }
 
 export interface EmailMessageSummary extends Omit<CachedMessage, 'text' | 'html' | 'structure'>, EmailMessageRef {
   id: string
