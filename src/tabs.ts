@@ -10,8 +10,10 @@ import { api } from './runtime'
  * active tab again. A tab opened without an instance (an older workspace, or a plain `tab:create`) is keyed ''.
  *
  * The current draft belongs to the one tab that showed it: it moves to the focused tab when that tab opens compose, and is
- * released when that tab leaves compose (Save draft, Discard, Send, Close, opening mail). Only that tab shows it again
- * after a tab switch, a reload, a restart or reopening the tab; a released draft stays closed until Compose opens it.
+ * released when that tab leaves compose (Save draft, Discard, Send, Close, opening mail), in the same turn as that action,
+ * also while a tab switch or restore is running. Only that tab shows it again after a tab switch, a reload, a restart or
+ * reopening the tab; a released draft stays closed until Compose or its Drafts entry opens it. Closing the tab releases the
+ * saved record at once; reopening the closed tab in the same session takes the draft back.
  */
 export interface ParkedEmailTab { selection: EmailSelection; navigation?: EmailNavigation; title?: string }
 
@@ -26,6 +28,10 @@ export interface EmailTabs {
   restore(selection: EmailSelection, instanceId: string | undefined, background: boolean): Promise<void>
   /** Bring the live mailbox's tab forward after an action changed it. */
   reveal(): void
+  /** A draft action or opening mail ended compose: no tab owns the draft from now on. */
+  release(): void
+  /** The live mailbox's tab title changed; the title of a tab without an instance is kept for the next start. */
+  titled(title: string): void
   /** Open a selection in a new Email tab and leave the current tab as it is. */
   openNew(selection: EmailSelection, title?: string): void
   subscribe(listener: () => void): () => void
@@ -37,16 +43,34 @@ const ADOPT_MS = 5000
 /** Plugin setting `{ draft, tab }`: the draft id and the tab that shows it (outside the draft record, which older Email reads strictly). */
 export const COMPOSE_TAB_SETTING = 'composeTab'
 interface ComposeOwner { draft: number; tab: string }
+/** Plugin setting: the last title of the Email tab without an instance. The host keeps instance tab titles itself. */
+export const MAIN_TAB_TITLE_SETTING = 'mainTabTitle'
 
 let current: EmailTabs | null = null
 export const emailTabs = (): EmailTabs | null => current
 export const focusedTabInstance = (): string | undefined => current?.instance()
 /** Show the live mailbox in its Email tab (actions from the sidebar, commands, notifications, links). */
 export function revealEmailTab(): void { if (current) current.reveal(); else api.workspace.openMainTab() }
+export function releaseComposeTab(): void { current?.release() }
+export function noteEmailTabTitle(title: string): void { current?.titled(title) }
 
 const newInstanceId = (): string => `mail-${globalThis.crypto?.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`}`
 const conflict = (error: unknown): boolean => (error as { code?: unknown } | null)?.code === 'REVISION_CONFLICT'
 const withoutMessage = (selection: EmailSelection): EmailSelection => ({ accountIds: selection.accountIds, view: selection.view, folder: selection.folder, query: selection.query })
+// Keys of this plugin's open main tabs in the window's layout ('' for a tab without an instance).
+function openTabKeys(api: ValleyPluginApi): Set<string> {
+  const keys = new Set<string>()
+  const visit = (node: unknown): void => {
+    if (!node || typeof node !== 'object') return
+    const { tabs, children } = node as { tabs?: unknown; children?: unknown }
+    if (Array.isArray(tabs)) for (const tab of tabs as { kind?: string; pluginId?: string; pluginInstanceId?: string | null }[]) {
+      if (tab?.kind === 'plugin' && tab.pluginId === api.pluginId) keys.add(tab.pluginInstanceId ?? '')
+    }
+    if (Array.isArray(children)) children.forEach(visit)
+  }
+  try { visit(api.workspace.captureLayout().layout) } catch { /* No layout: nothing is known to be open. */ }
+  return keys
+}
 
 export function createEmailTabs(api: ValleyPluginApi, store: EmailStore): EmailTabs {
   let focused: string | null = null
@@ -61,6 +85,17 @@ export function createEmailTabs(api: ValleyPluginApi, store: EmailStore): EmailT
   let shown = false
   let ready = false
   let settling = 0
+  // The owner whose tab closed in this session (reopening that tab takes the draft back), whether this window's layout showed
+  // the owner's tab since it took the draft, and whether an action released the draft before the saved owner loaded.
+  let closed: ComposeOwner | null = null
+  let seen = false
+  let releasedEarly = false
+  let title = ''
+  let titleTimer: ReturnType<typeof setTimeout> | undefined
+  const saveOwner = (next: ComposeOwner | null): void => { void api.settings.set(COMPOSE_TAB_SETTING, next).catch(() => undefined) }
+  const savedTitle = api.settings.get()[MAIN_TAB_TITLE_SETTING]
+  // A background tab without an instance shows its last title until it is visited.
+  if (typeof savedTitle === 'string' && savedTitle) { title = savedTitle; api.workspace.setMainTabTitle(savedTitle) }
   const mailbox = (): string => { const state = store.getSnapshot(); return JSON.stringify([state.selectedAccountIds, state.view, state.selectedFolder, state.selectedUid]) }
   const listeners = new Set<() => void>()
   let queue: Promise<void> = Promise.resolve()
@@ -94,12 +129,13 @@ export function createEmailTabs(api: ValleyPluginApi, store: EmailStore): EmailT
     try { await store.restoreSelection(selection); return } catch { if (!selection.message) return }
     try { await store.restoreSelection(withoutMessage(selection)) } catch { /* The account or folder is gone: keep the mailbox. */ }
   }
-  // A tab without in-session history starts its own history at the restored selection.
-  const fresh = async (selection: EmailSelection, composing = false): Promise<void> => {
+  // A tab without in-session history starts its own history at the restored selection; false when nothing was restored.
+  const fresh = async (selection: EmailSelection): Promise<boolean> => {
     for (const candidate of selection.message ? [selection, withoutMessage(selection)] : [selection]) {
-      try { await store.restoreNavigation({ selection: candidate, history: [], historyIndex: -1, composing, error: null }); return }
-      catch (error) { if (conflict(error)) return }
+      try { await store.restoreNavigation({ selection: candidate, history: [], historyIndex: -1, composing: false, error: null }); return true }
+      catch (error) { if (conflict(error)) return false }
     }
+    return false
   }
   const owns = (tab: string): boolean => owner?.tab === tab && store.getSnapshot().compose?.id === owner.draft
   // Follows the live mailbox outside tab switches and restores, which rewrite it on purpose.
@@ -113,7 +149,31 @@ export function createEmailTabs(api: ValleyPluginApi, store: EmailStore): EmailT
     const next = !compose || released ? null : composing && here !== null ? { draft: compose.id, tab: here } : owner?.draft === compose.id ? owner : null
     if (next?.tab === owner?.tab && next?.draft === owner?.draft) return
     owner = next
-    void api.settings.set(COMPOSE_TAB_SETTING, next).catch(() => undefined)
+    closed = null
+    seen = next !== null && openTabKeys(api).has(next.tab)
+    saveOwner(next)
+  }
+  // The owner's tab closed: the saved record goes at once, so no later start reopens the draft; reopening the tab in this
+  // session takes it back. Only a tab this window showed counts as closed (another window, or a layout still loading, may
+  // hold a tab this one has not seen).
+  const watchTabs = (): void => {
+    if (!ready || disposed || !owner && !closed) return
+    const open = openTabKeys(api)
+    if (owner) {
+      if (open.has(owner.tab)) { seen = true; return }
+      if (!seen) return
+      closed = owner
+      owner = null
+      seen = false
+      saveOwner(null)
+      return
+    }
+    if (closed && open.has(closed.tab) && store.getSnapshot().compose?.id === closed.draft) {
+      owner = closed
+      closed = null
+      seen = true
+      saveOwner(owner)
+    }
   }
   const settle = async (work: () => Promise<void>): Promise<void> => {
     settling++
@@ -122,9 +182,13 @@ export function createEmailTabs(api: ValleyPluginApi, store: EmailStore): EmailT
   const loaded = store.whenReady.catch(() => undefined).then(() => {
     const saved = api.settings.get()[COMPOSE_TAB_SETTING] as Partial<ComposeOwner> | null | undefined
     const draft = store.getSnapshot().compose
-    if (draft && saved && typeof saved.tab === 'string' && saved.draft === draft.id) owner = { draft: draft.id, tab: saved.tab }
+    if (!releasedEarly && draft && saved && typeof saved.tab === 'string' && saved.draft === draft.id) owner = { draft: draft.id, tab: saved.tab }
+    // A record that names no loaded draft (discarded, sent or replaced elsewhere) is stale.
+    else if (saved && !releasedEarly) saveOwner(null)
     ready = true
+    seen = owner !== null && openTabKeys(api).has(owner.tab)
     track()
+    watchTabs()
   })
   const focus = (tab: string): Promise<void> => enqueue(() => settle(async () => { try { await focusNow(tab) } catch { /* Switching never blocks the next switch. */ } }))
   const focusNow = async (tab: string): Promise<void> => {
@@ -143,12 +207,17 @@ export function createEmailTabs(api: ValleyPluginApi, store: EmailStore): EmailT
     parked.delete(tab)
     notify()
     await loaded
-    const composing = owns(tab)
-    if (entry?.navigation) {
-      try { await store.restoreNavigation({ ...entry.navigation, composing }) } catch (error) { if (!conflict(error)) await fresh(entry.navigation.selection, composing) }
-    } else if (entry) await fresh(entry.selection, composing)
+    // Whether the tab shows the draft is decided once its mailbox is back, so a release during the switch holds.
+    if (entry) {
+      let restored = false
+      if (entry.navigation) {
+        try { await store.restoreNavigation({ ...entry.navigation, composing: false }); restored = true }
+        catch (error) { if (!conflict(error)) restored = await fresh(entry.navigation.selection) }
+      } else restored = await fresh(entry.selection)
+      if (restored && focused === tab && owns(tab)) store.setComposing(true)
+    }
     // A tab seen for the first time keeps the live mailbox; its saved state, if any, arrives through restore.
-    else if (before !== null) store.setComposing(composing)
+    else if (before !== null) store.setComposing(owns(tab))
   }
   const offStore = store.subscribe(() => {
     track()
@@ -162,6 +231,7 @@ export function createEmailTabs(api: ValleyPluginApi, store: EmailStore): EmailT
     const tab = state.activePluginTab
     if (tab?.pluginId === api.pluginId) void focus(key(tab.instanceId))
   })
+  const offLayout = api.subscribe(watchTabs)
   const tabs: EmailTabs = {
     instance: () => focused || undefined,
     claimed: () => focused !== null,
@@ -204,6 +274,26 @@ export function createEmailTabs(api: ValleyPluginApi, store: EmailStore): EmailT
       adoptUntil = Date.now() + ADOPT_MS
       api.workspace.openMainTab()
     },
+    release: () => {
+      if (disposed) return
+      shown = false
+      closed = null
+      if (!ready) releasedEarly = true
+      const saved = api.settings.get()[COMPOSE_TAB_SETTING]
+      if (owner === null && ready && (saved === null || saved === undefined)) return
+      owner = null
+      saveOwner(null)
+    },
+    titled: (next) => {
+      if (disposed || focused !== '' || !next) return
+      // One write for the titles a single change passes through (a restore sets the message title, then Compose).
+      clearTimeout(titleTimer)
+      titleTimer = setTimeout(() => {
+        if (disposed || next === title) return
+        title = next
+        void api.settings.set(MAIN_TAB_TITLE_SETTING, next).catch(() => undefined)
+      }, 0)
+    },
     openNew: (selection, title) => {
       if (disposed) return
       const instanceId = newInstanceId()
@@ -214,7 +304,9 @@ export function createEmailTabs(api: ValleyPluginApi, store: EmailStore): EmailT
     subscribe: (listener) => { listeners.add(listener); return () => { listeners.delete(listener) } },
     dispose: () => {
       disposed = true
+      clearTimeout(titleTimer)
       off()
+      offLayout()
       offStore()
       listeners.clear()
       if (current === tabs) current = null

@@ -251,6 +251,8 @@
   "email.draftInvalid": "保存的草稿无效，已保留原样。",
   "email.draftConflict": "此草稿已在其他位置更改。你的编辑已保留在此窗口；为保护已保存的草稿，保存和丢弃操作已暂停。",
   "email.draftUncertain": "邮件可能已发送。再次主动发送此草稿前，请先检查已发送邮件。",
+  "email.draftLabel": "草稿",
+  "email.noRecipients": "无收件人",
   "email.resendTitle": "再次发送此草稿？",
   "email.resendMessage": "上次发送可能已到达服务器。请先检查“已发送”，因为再次发送可能会投递第二份副本。",
   "email.resend": "再次发送",

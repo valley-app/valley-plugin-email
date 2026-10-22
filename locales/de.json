@@ -251,6 +251,8 @@
   "email.draftInvalid": "Der gespeicherte Entwurf ist ungültig. Er wurde unverändert aufbewahrt.",
   "email.draftConflict": "Dieser Entwurf wurde an anderer Stelle geändert. Deine Änderungen bleiben hier erhalten. Speichern und Verwerfen sind gesperrt, damit der gespeicherte Entwurf erhalten bleibt.",
   "email.draftUncertain": "Die Nachricht wurde möglicherweise gesendet. Prüfe Gesendet, bevor du diesen Entwurf bewusst erneut sendest.",
+  "email.draftLabel": "Entwurf",
+  "email.noRecipients": "Keine Empfänger",
   "email.resendTitle": "Diesen Entwurf erneut senden?",
   "email.resendMessage": "Der letzte Versuch hat den Server möglicherweise erreicht. Prüfe zuerst Gesendet, denn ein erneutes Senden kann eine zweite Kopie zustellen.",
   "email.resend": "Erneut senden",

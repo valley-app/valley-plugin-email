@@ -251,6 +251,8 @@
   "email.draftInvalid": "El borrador guardado no es válido. Se ha conservado sin cambios.",
   "email.draftConflict": "Este borrador cambió en otro lugar. Tus cambios se conservan aquí; guardar y descartar están bloqueados para proteger el borrador guardado.",
   "email.draftUncertain": "Es posible que el envío se haya completado. Revisa Enviados antes de volver a enviar este borrador intencionadamente.",
+  "email.draftLabel": "Borrador",
+  "email.noRecipients": "Sin destinatarios",
   "email.resendTitle": "¿Enviar este borrador de nuevo?",
   "email.resendMessage": "Es posible que el último intento haya llegado al servidor. Revisa primero Enviados, porque enviarlo de nuevo puede entregar una segunda copia.",
   "email.resend": "Enviar de nuevo",

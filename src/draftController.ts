@@ -11,6 +11,8 @@ interface DraftPorts {
   set(patch: Partial<EmailSnapshot>): void
   report(error: unknown): void
   updateTitle(): void
+  /** Compose ended by a draft action: no tab owns the draft any more (tabs.ts). */
+  release(): void
   resolveContacts(): Promise<void>
   invalidateMessages(): void
   refreshMessages(): Promise<void>
@@ -115,7 +117,9 @@ export function createDraftController(api: ValleyPluginApi, ports: DraftPorts, r
       if (ports.snapshot().compose !== previousDraft || !valid()) return
       if (previousDraft && !await repository.clear(previousDraft)) return
       if (ports.snapshot().compose !== previousDraft || !valid()) return
-      ports.set({ composing: true, compose: { id: ++draftSequence, accountId, mode, to, cc, bcc: [], pending: { to: '', cc: '', bcc: '' }, subject, text,
+      // A draft's id is the time it was started (its date in the Drafts mailbox), kept unique and increasing.
+      draftSequence = Math.max(draftSequence + 1, Date.now())
+      ports.set({ composing: true, compose: { id: draftSequence, accountId, mode, to, cc, bcc: [], pending: { to: '', cc: '', bcc: '' }, subject, text,
         ...initial, inReplyTo: mode === 'reply' || mode === 'reply-all' ? message?.messageId : undefined, dirty: false }, error: null })
       ports.updateTitle()
       if (mode !== 'new') persist(ports.snapshot().compose!)
@@ -137,6 +141,7 @@ export function createDraftController(api: ValleyPluginApi, ports: DraftPorts, r
     try {
       await repository.save(draft)
       if (current() && ports.snapshot().compose?.id === draft.id) {
+        ports.release()
         ports.set({ composing: false })
         ports.updateTitle()
       }
@@ -151,6 +156,7 @@ export function createDraftController(api: ValleyPluginApi, ports: DraftPorts, r
       if (!await allowDiscard() || !current() || token !== generation || ports.snapshot().compose !== draft) return
       if (draft && !await repository.clear(draft)) return
       if (!current() || token !== generation || ports.snapshot().compose !== draft) return
+      ports.release()
       ports.set({ compose: null, composing: false })
       ports.updateTitle()
     } catch (error) { if (current() && token === generation) ports.report(error) }
@@ -166,6 +172,7 @@ export function createDraftController(api: ValleyPluginApi, ports: DraftPorts, r
     ++generation
     const blank = known && !draft.dirty && draft.mode === 'new' && !draft.inReplyTo && !repository.holds(draft)
       && !draft.to.length && !draft.cc.length && !draft.bcc.length && !draft.subject && !draft.text && !Object.values(draft.pending).some(Boolean)
+    ports.release()
     ports.set(blank ? { compose: null, composing: false } : { composing: false })
     ports.updateTitle()
     return { discarded: blank }
@@ -220,6 +227,7 @@ export function createDraftController(api: ValleyPluginApi, ports: DraftPorts, r
         if (await repository.clear(draft)) {
           ports.sent(draft)
           if (current() && ports.snapshot().compose === draft) {
+            ports.release()
             ports.set({ compose: null, composing: false })
             ports.updateTitle()
           }

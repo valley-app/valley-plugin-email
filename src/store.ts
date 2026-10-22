@@ -16,7 +16,7 @@ export { messageKey } from './messageController'
 import type { EmailAddress, EmailFilters, EmailGroupRef, EmailMailboxView, EmailMessageAction, EmailMessageDetail, EmailMessageRef, EmailMessageSummary } from './mailTypes'
 import { api } from './runtime'
 import { uiText } from './localization'
-import { COMPOSE_TAB_SETTING, focusedTabInstance } from './tabs'
+import { COMPOSE_TAB_SETTING, MAIN_TAB_TITLE_SETTING, focusedTabInstance, noteEmailTabTitle, releaseComposeTab } from './tabs'
 
 export interface ComposeDraft {
   id: number
@@ -156,8 +156,12 @@ function createStore(api: ValleyPluginApi): EmailStore {
     for (const listener of listeners) listener()
   }
   const activeAccountIds = (): string[] => state.selectedAccountIds.length ? state.selectedAccountIds : state.accounts.map((account) => account.id)
-  const updateTitle = (): void => { if (!disposed) api.workspace.setMainTabTitle(state.composing ? uiText('auto.47da6f0838f0')
-    : state.selectedMessage?.subject || (state.view === 'folder' ? state.selectedFolder : uiText(`email.view.${state.view}`)), focusedTabInstance()) }
+  const updateTitle = (): void => {
+    if (disposed) return
+    const title = state.composing ? uiText('auto.47da6f0838f0') : state.selectedMessage?.subject || (state.view === 'folder' ? state.selectedFolder : uiText(`email.view.${state.view}`))
+    api.workspace.setMainTabTitle(title, focusedTabInstance())
+    noteEmailTabTitle(title)
+  }
   const contacts = createContactResolution(api, () => {
     const messages = [...state.messages, ...(state.selectedMessage ? [state.selectedMessage] : [])]
     return [...messages.flatMap((message) => Object.values(message.addresses).flat()), ...(state.compose ? [...state.compose.to, ...state.compose.cc, ...state.compose.bcc] : [])].map((item) => item.address)
@@ -199,7 +203,7 @@ function createStore(api: ValleyPluginApi): EmailStore {
   const sync = syncController.sync
   const syncIfStale = (): Promise<void> => syncController.syncIfStale()
   const draftController = createDraftController(api, {
-    snapshot: () => state, active: () => !disposed, set, report, updateTitle, resolveContacts,
+    snapshot: () => state, active: () => !disposed, set, report, updateTitle, resolveContacts, release: releaseComposeTab,
     invalidateMessages: () => { messagesController.invalidateMessages() }, refreshMessages: () => loadMessages(),
     sent: (draft) => { if (drafts.draft === draft) drafts.draft = null }
   }, drafts, mail)
@@ -218,8 +222,8 @@ function createStore(api: ValleyPluginApi): EmailStore {
       if (state.syncing) syncController.recordRefresh(key, refresh)
     }
   })
-  // Remembering the compose tab is not a display change and keeps the per-message plain text/HTML choice.
-  const displaySettings = (): string => JSON.stringify({ ...api.settings.get(), [COMPOSE_TAB_SETTING]: undefined })
+  // Remembering the compose tab or a tab title is not a display change and keeps the per-message plain text/HTML choice.
+  const displaySettings = (): string => JSON.stringify({ ...api.settings.get(), [COMPOSE_TAB_SETTING]: undefined, [MAIN_TAB_TITLE_SETTING]: undefined })
   let displayed = displaySettings()
   const offSettings = api.settings.subscribe(() => {
     const next = displaySettings()
@@ -242,7 +246,8 @@ function createStore(api: ValleyPluginApi): EmailStore {
       return draining
     },
     smartGroups, refreshAccounts, selectAccount, selectAccounts, selectView, selectFolder: (folder) => selectView('folder', folder), loadMore: () => loadMessages(true),
-    openMessage, sync, syncIfStale, act, setPlainText: (message, htmlContent, plainText) => set({ bodyOverride: { key: messageKey(message), htmlContent, plainText } }), dismissError: () => set({ error: null }),
+    // Opening mail in the tab that shows the draft releases the draft in that same turn.
+    openMessage: (message) => { if (!disposed && state.composing) releaseComposeTab(); openMessage(message) }, sync, syncIfStale, act, setPlainText: (message, htmlContent, plainText) => set({ bodyOverride: { key: messageKey(message), htmlContent, plainText } }), dismissError: () => set({ error: null }),
     setQuery,
     setFilters: filters => { messagesController.invalidateMessages(); set({ filters, messages: [], cursor: undefined }); void api.settings.set('filters', filters).catch(report); void loadMessages() },
     selectGroup: (accountId, groupId) => selectView('recent', state.selectedFolder, { accountId, groupId }),

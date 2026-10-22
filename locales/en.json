@@ -251,6 +251,8 @@
   "email.draftInvalid": "The saved draft is invalid. It has been preserved without changes.",
   "email.draftConflict": "This draft changed elsewhere. Your edits are kept here; saving and discarding are blocked to protect the saved draft.",
   "email.draftUncertain": "Sending may have completed. Check Sent before intentionally sending this draft again.",
+  "email.draftLabel": "Draft",
+  "email.noRecipients": "No recipients",
   "email.resendTitle": "Send this draft again?",
   "email.resendMessage": "The last attempt may have reached the server. Check Sent first, because sending again can deliver a second copy.",
   "email.resend": "Send again",

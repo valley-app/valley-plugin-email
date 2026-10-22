@@ -63,6 +63,9 @@ const CSS = `
 .email-message-row.unread .email-message-top strong,.email-message-row.unread .email-message-subject { font-weight:700; color:var(--title-color); }
 .email-message-badges { display:flex; flex-direction:column; gap:5px; width:13px; flex:0 0 13px; margin-top:4px; color:var(--accent-color); }
 .email-message-badges svg { width:12px; height:12px; }
+.email-draft-open { display:block; width:100%; margin:0; padding:0; border:0; border-radius:0; font:inherit; color:inherit; text-align:start; }
+.email-draft-open:disabled { cursor:default; }
+.email-draft-label { flex:none; align-self:center; padding:1px 5px; border-radius:var(--radius-sm,3px); background:var(--accent-tint-bg); color:var(--accent-tint-text); font-size:.625rem; font-weight:600; line-height:1.4; }
 .email-avatar { display:block; width:28px; height:28px; border-radius:50%; object-fit:cover; flex:none; }
 .email-avatar-initials { display:grid; place-items:center; box-sizing:border-box; background:#8f969f; color:#fff; font:650 .71875rem/1 var(--body-font); letter-spacing:.02em; text-transform:uppercase; }
 .email-swipe-row { position:relative; overflow:hidden; border-bottom:1px solid var(--border-light); background:var(--container-color); }

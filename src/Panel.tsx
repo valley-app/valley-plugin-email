@@ -9,7 +9,7 @@ import { Archive, ChevronDown, EyeOff, Flag, Google, Inbox, Mail, Microsoft, Plu
 import { SwipeRow } from './SwipeRow'
 import { ContactAvatar, contactName } from './People'
 import { uiText } from './localization'
-import { formatEmailTimestamp, messageKey } from './store'
+import { formatEmailTimestamp, messageKey, type ComposeDraft, type EmailSnapshot } from './store'
 import { useEmailDateFormat } from './hooks'
 import { emailTabs, revealEmailTab } from './tabs'
 
@@ -27,6 +27,50 @@ export function FolderIcon({ mailbox }: { mailbox: EmailMailbox }): React.ReactE
 export function folderLabel(mailbox: EmailMailbox): string {
   const kind = mailbox.specialUse?.replace('\\', '').toLowerCase() || (mailbox.path.toUpperCase() === 'INBOX' ? 'inbox' : '')
   return ['inbox', 'sent', 'drafts', 'archive', 'all', 'trash', 'junk', 'flagged'].includes(kind) ? uiText(`email.folder.${kind}`) : mailbox.name || mailbox.path
+}
+
+/** The account's Drafts mailbox: its special-use folder, else a folder named Drafts. */
+export function draftsMailbox(mailboxes: EmailMailbox[]): EmailMailbox | undefined {
+  return mailboxes.find((mailbox) => mailbox.specialUse === '\\Drafts')
+    ?? mailboxes.find((mailbox) => /^drafts?$/i.test((mailbox.delimiter ? mailbox.path.split(mailbox.delimiter).pop() : mailbox.name) || mailbox.name))
+}
+/** Whether the mailbox list shows the local draft: in the Drafts mailbox of the draft's account, matching the search. */
+export function showsDraft(snap: Pick<EmailSnapshot, 'compose' | 'view' | 'group' | 'selectedFolder' | 'selectedAccountIds' | 'accounts' | 'mailboxesByAccount' | 'query'>): snap is typeof snap & { compose: ComposeDraft } {
+  const draft = snap.compose
+  if (!draft || snap.view !== 'folder' || snap.group || !snap.accounts.some((account) => account.id === draft.accountId)) return false
+  if (snap.selectedAccountIds.length && !snap.selectedAccountIds.includes(draft.accountId)) return false
+  if (draftsMailbox(snap.mailboxesByAccount[draft.accountId] ?? [])?.path !== snap.selectedFolder) return false
+  const query = snap.query.trim().toLowerCase()
+  return !query || [draft.subject, draft.text, ...[...draft.to, ...draft.cc, ...draft.bcc].flatMap((entry) => [entry.name, entry.address])].some((value) => value.toLowerCase().includes(query))
+}
+// A draft's id is the time it was started; ids from before that rule may not be one.
+const draftDate = (draft: ComposeDraft): string | null => draft.id >= Date.UTC(2000, 0, 1) && draft.id <= Date.now() + 86_400_000 ? new Date(draft.id).toISOString() : null
+
+/** The local draft as the first entry of its account's Drafts mailbox; opening it shows it in the current Email tab. */
+const DraftEntry: React.FC<{ draft: ComposeDraft }> = ({ draft }) => {
+  const { store, snap } = useEmail()
+  const { dateFormat, timeFormat } = useEmailDateFormat()
+  const recipients = [...draft.to, ...draft.cc, ...draft.bcc]
+  const names = recipients.map((entry) => contactName(entry, snap.contacts)).join(', ') || uiText('email.noRecipients')
+  const subject = draft.subject || uiText('email.noSubject')
+  const date = draftDate(draft)
+  const label = uiText('email.draftLabel')
+  return <div className={`email-swipe-row email-draft-entry${snap.composing ? ' active' : ''}`}>
+    <button type="button" className="email-swipe-content email-draft-open" disabled={snap.sending} aria-label={`${label}: ${subject}, ${names}`}
+      onClick={() => { void store.startCompose().then(revealEmailTab) }}>
+      <div className="email-message-row">
+        <span className="email-message-avatar"><ContactAvatar address={recipients[0]} label={names} contacts={snap.contacts} /></span>
+        <div className="email-message-copy">
+          <div className="email-message-top"><strong title={recipients.map((entry) => entry.address).join(', ')}>{names}</strong>
+            <span className="email-draft-label">{label}</span>
+            {date && <time title={formatEmailTimestamp(date, dateFormat, timeFormat, api.ui.language(), true)}>{formatEmailTimestamp(date, dateFormat, timeFormat, api.ui.language())}</time>}</div>
+          <div className="email-message-subject">{subject}</div>
+          <div className="email-message-snippet">{draft.text.split('\n').find((line) => line.trim())?.trim() ?? ''}</div>
+        </div>
+        <span className="email-message-badges" />
+      </div>
+    </button>
+  </div>
 }
 
 export const AccountPopover: React.FC = () => {
@@ -201,7 +245,9 @@ export const Panel: React.FC = () => {
     if (list.current) list.current.scrollTop = 0
     setViewport(current => ({ ...current, top: 0 }))
   }, [snap.query, snap.view, snap.selectedFolder, snap.selectedAccountIds, snap.filters])
-  const first = Math.max(0, Math.min(Math.floor(viewport.top / rowHeight) - 5, snap.messages.length - 1))
+  const draft = showsDraft(snap) ? snap.compose : null
+  // The draft entry sits above the first message row.
+  const first = Math.max(0, Math.min(Math.floor(Math.max(0, viewport.top - (draft ? rowHeight : 0)) / rowHeight) - 5, snap.messages.length - 1))
   const last = Math.min(snap.messages.length, first + Math.ceil(viewport.height / rowHeight) + 10)
   const { dateFormat, timeFormat } = useEmailDateFormat()
   const account = snap.accounts.find((candidate) => candidate.id === snap.selectedAccountId)
@@ -220,7 +266,8 @@ export const Panel: React.FC = () => {
         </div>
         <div className="email-list-status"><span>{uiText('email.cachedMail')}</span><span>{snap.loadingMessages ? uiText('auto.33ce417454bf') : `${snap.messages.length}${snap.cursor ? '+' : ''}`}</span></div>
         <div ref={list} className="email-message-list" aria-busy={snap.loadingMessages}>
-          {!snap.loadingMessages && !snap.messages.length && (snap.syncing ? <api.ui.ContentLoader label={uiText('auto.33ce417454bf')} compact /> : <div className="email-empty">{uiText('auto.34e618e62f74')}</div>)}
+          {draft && <DraftEntry draft={draft} />}
+          {!snap.loadingMessages && !snap.messages.length && !draft && (snap.syncing ? <api.ui.ContentLoader label={uiText('auto.33ce417454bf')} compact /> : <div className="email-empty">{uiText('auto.34e618e62f74')}</div>)}
           {first > 0 && <div aria-hidden="true" style={{ height: first * rowHeight }} />}
           {snap.messages.slice(first, last).map((message) => {
             const messageAccount = snap.accounts.find((candidate) => candidate.id === message.accountId)
