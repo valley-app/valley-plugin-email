@@ -251,6 +251,8 @@
   "email.draftInvalid": "Le brouillon enregistré est invalide. Il a été conservé sans modification.",
   "email.draftConflict": "Ce brouillon a été modifié ailleurs. Vos modifications sont conservées ici ; l’enregistrement et la suppression sont bloqués pour protéger le brouillon enregistré.",
   "email.draftUncertain": "Le message a peut-être été envoyé. Vérifiez les messages envoyés avant de renvoyer volontairement ce brouillon.",
+  "email.draftLabel": "Brouillon",
+  "email.noRecipients": "Aucun destinataire",
   "email.resendTitle": "Renvoyer ce brouillon ?",
   "email.resendMessage": "La dernière tentative a peut-être atteint le serveur. Vérifiez d’abord les messages envoyés, car un nouvel envoi peut livrer une deuxième copie.",
   "email.resend": "Renvoyer",
