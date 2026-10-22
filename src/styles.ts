@@ -1,16 +1,19 @@
 const CSS = `
 
 .email-panel,.email-page { display:flex; flex-direction:column; height:100%; min-height:0; min-width:0; color:var(--text-color); }
-.email-panel { container:email-panel / inline-size; }
+.email-panel { container:email-panel / inline-size; overflow-y:auto; }
 .email-page { container:email-page / inline-size; background:var(--pane-bg); }
 .email-panel .panel-header { gap:6px; }
 .email-panel .panel-title { flex:0 0 auto; }
-.email-panel-toolbar { display:flex; flex-direction:column; align-items:stretch; flex:none; box-sizing:border-box; border-bottom:1px solid var(--border-light); }
-.email-panel-toolbar > .email-mailbox-controls { padding:0 6px; height:calc(var(--app-bar-height) - 1px); flex:none; }
-.email-inline-options { max-height:min(45vh,420px); overflow:auto; border-top:1px solid var(--border-light); padding:6px; }
+.email-panel-toolbar { display:flex; flex-direction:column; align-items:stretch; flex:none; }
+.email-panel .email-panel-toolbar > :is(.email-mailbox-controls,.email-add-account) { flex:none; box-sizing:border-box; height:var(--app-bar-height); border-bottom:1px solid var(--border-light); }
+.email-panel .email-panel-toolbar > .email-mailbox-controls { padding:0 6px; }
+.email-inline-options { flex:none; border-bottom:1px solid var(--border-light); padding:6px; }
 .email-inline-options .email-account-popover { width:auto; max-width:none; max-height:none; padding:0; overflow:visible; }
 .email-selector:focus { outline:none; box-shadow:none; }
-.email-selector:focus-visible { outline:1px solid var(--accent-color); outline-offset:1px; }
+.email-selector:focus-visible { outline:1px solid var(--accent-color); outline-offset:-1px; }
+.email-mailbox-controls .email-icon-btn:focus-visible { outline:1px solid var(--accent-color); outline-offset:-1px; box-shadow:none; }
+.email-mailbox-controls [data-focus-source="pointer"]:focus-visible { outline:none; box-shadow:none; }
 .email-selector[aria-expanded="true"] { background:var(--hover-bg); color:var(--title-color); }
 .email-add-account { display:flex; align-items:center; gap:6px; width:100%; height:100%; padding:0 12px; border:0; background:none; color:var(--text-secondary); font:inherit; font-size:.8125rem; text-align:left; cursor:pointer; }
 .email-add-account:hover { background:var(--hover-bg); color:var(--title-color); }
@@ -30,7 +33,7 @@ const CSS = `
 .email-selector span { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .email-selector svg { width:14px; height:14px; flex:none; }
 .email-selector > svg:last-child { width:10px; }
-.email-mailbox-controls.compact .email-account-selector { padding:0 4px; flex:0 0 26px; }
+.email-mailbox-controls.compact .email-account-selector { justify-content:center; width:26px; padding:0; flex:0 0 26px; }
 .email-mailbox-controls.compact .email-account-selector span,.email-mailbox-controls.compact .email-account-selector > svg:last-child { display:none; }
 .email-mailbox-controls.compact .email-selector { max-width:110px; }
 .email-toolbar { --email-toolbar-action-space:210px; position:relative; display:flex; align-items:center; gap:6px; height:var(--app-bar-height); min-height:var(--app-bar-height); box-sizing:border-box; padding:0 calc(var(--plugin-actions-offset, 0px) + 8px) 0 calc(var(--plugin-navigation-offset, 0px) + 8px); border-bottom:1px solid var(--border-light); background:var(--pane-bg); }
@@ -164,7 +167,7 @@ button.email-person { border:0; padding:0; background:none; text-align:left; cur
 .email-recipient-chips { display:flex; flex-wrap:wrap; gap:5px; flex:1; min-width:0; align-items:center; }
 .email-recipient-chip { display:inline-flex; align-items:center; gap:6px; max-width:100%; border-radius:5px; padding:3px 6px; background:var(--container-color-light); font-size:.8125rem; }
 .email-recipient-chip > button { border:0; background:none; color:var(--text-secondary); cursor:pointer; }
-.email-recipient-add { min-width:120px; max-width:100%; border:0; background:none; padding:4px 0; font:inherit; font-size:.8125rem; color:var(--text-secondary); text-align:left; cursor:text; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.email-recipient-add { flex:1 1 120px; min-width:0; max-width:100%; border:0; background:none; padding:4px 0; font:inherit; font-size:.8125rem; color:var(--text-secondary); text-align:left; cursor:text; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .email-recipient-popover { padding:10px; width:340px; max-width:calc(100vw - 32px); }
 .email-recipient-results { max-height:250px; overflow:auto; margin:6px 0; }
 .email-recipient-error { color:var(--negative-color); padding:8px 0; font-size:.75rem; }

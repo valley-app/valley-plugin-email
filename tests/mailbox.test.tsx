@@ -68,8 +68,10 @@ describe('Email mailbox', () => {
     expect(card).not.toHaveProperty('render')
     expect(await card.open({ id: message.id, accountId: 'one' }, { newTab: true })).toBe(true)
     expect(mock.mail.readMessage).toHaveBeenLastCalledWith({ accountId: 'one', folder: 'INBOX', uid: 7 })
-    expect(getStore().getSnapshot()).toMatchObject({ selectedAccountIds: ['one'], selectedFolder: 'INBOX', selectedUid: 7, selectedMessage: { id: message.id } })
-    expect(open).toHaveBeenCalledWith({ newTab: true })
+    expect(open).toHaveBeenCalledWith({ instanceId: expect.stringMatching(/^mail-/), newTab: true, title: message.subject })
+    expect(getStore().getSnapshot().selectedAccountIds).toEqual(['two'])
+    mock.emitState({ activePluginTab: { pluginId: 'email', instanceId: open.mock.calls[0][0]!.instanceId } })
+    await waitFor(() => expect(getStore().getSnapshot()).toMatchObject({ selectedAccountIds: ['one'], selectedFolder: 'INBOX', selectedUid: 7, selectedMessage: { id: message.id } }))
     await dispose?.()
     dispose = undefined
     expect(mock.api.interop.extensions.providers(SEARCH_RESULT_ACTION_V1)).toEqual([])
@@ -1154,6 +1156,25 @@ describe('Email message actions', () => {
     await waitFor(() => expect(mock.mail.applyMessageAction).toHaveBeenCalledTimes(2))
     expect(mock.mail.applyMessageAction).toHaveBeenLastCalledWith({ accountId: 'one', folder: 'INBOX', uid: 7, action: 'mark-read' })
     expect(listed().flags).toContain('\\Seen')
+    await act(async () => { read.release({ ok: true, data: { action: 'mark-read', folder: 'INBOX', messages: [] } }) })
+  })
+
+  it('removes the unread mark at once when a message opens in a new tab while another action is in flight', async () => {
+    const mock = setup()
+    const store = getStore()
+    const { container } = render(<Panel />)
+    await waitFor(() => expect(container.querySelector('.email-swipe-content')).not.toBeNull())
+    await waitFor(() => expect(listed()).toBeDefined())
+    const flag = held(), read = held()
+    vi.mocked(mock.mail.applyMessageAction).mockImplementationOnce(() => flag.promise).mockImplementationOnce(() => read.promise)
+    let flagged!: Promise<boolean>
+    act(() => { flagged = store.act(message, 'flag') })
+    act(() => { fireEvent.click(container.querySelector('.email-swipe-content')!, { metaKey: true }) })
+    expect(listed().flags).toContain('\\Seen')
+    expect(mock.mail.applyMessageAction).toHaveBeenCalledTimes(1)
+    await act(async () => { flag.release({ ok: true, data: { action: 'flag', folder: 'INBOX', messages: [{ ...message, flags: ['\\Flagged'] } as never] } }); await flagged })
+    await waitFor(() => expect(mock.mail.applyMessageAction).toHaveBeenCalledTimes(2))
+    expect(mock.mail.applyMessageAction).toHaveBeenLastCalledWith({ accountId: 'one', folder: 'INBOX', uid: 7, action: 'mark-read' })
     await act(async () => { read.release({ ok: true, data: { action: 'mark-read', folder: 'INBOX', messages: [] } }) })
   })
 

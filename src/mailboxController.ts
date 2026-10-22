@@ -118,6 +118,7 @@ export function createMailboxController(mail: EmailDriver, ports: MailboxPorts) 
   async function restoreNavigation(saved: EmailNavigation): Promise<void> {
     if (!await restoreSelection(saved.selection, false)) throw Object.assign(new Error('The Email selection changed while it was restored.'), { code: 'REVISION_CONFLICT', outcome: 'not-applied' as const })
     history = [...saved.history]; historyIndex = saved.historyIndex
+    if (!history.length) pushHistory()
     ports.set({ composing: saved.composing && Boolean(ports.snapshot().compose), error: saved.error })
     ports.updateTitle()
   }

@@ -15,6 +15,7 @@ export { messageKey } from './messageController'
 import type { EmailAddress, EmailFilters, EmailMailboxView, EmailMessageAction, EmailMessageDetail, EmailMessageRef, EmailMessageSummary } from './mailTypes'
 import { api } from './runtime'
 import { uiText } from './localization'
+import { focusedTabInstance } from './tabs'
 
 export interface ComposeDraft {
   id: number
@@ -144,7 +145,7 @@ function createStore(api: ValleyPluginApi): EmailStore {
   }
   const activeAccountIds = (): string[] => state.selectedAccountIds.length ? state.selectedAccountIds : state.accounts.map((account) => account.id)
   const updateTitle = (): void => { if (!disposed) api.workspace.setMainTabTitle(state.composing ? uiText('auto.47da6f0838f0')
-    : state.selectedMessage?.subject || (state.view === 'folder' ? state.selectedFolder : uiText(`email.view.${state.view}`))) }
+    : state.selectedMessage?.subject || (state.view === 'folder' ? state.selectedFolder : uiText(`email.view.${state.view}`)), focusedTabInstance()) }
   const contacts = createContactResolution(api, () => {
     const messages = [...state.messages, ...(state.selectedMessage ? [state.selectedMessage] : [])]
     return [...messages.flatMap((message) => Object.values(message.addresses).flat()), ...(state.compose ? [...state.compose.to, ...state.compose.cc, ...state.compose.bcc] : [])].map((item) => item.address)

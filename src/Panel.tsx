@@ -10,6 +10,7 @@ import { ContactAvatar, contactName } from './People'
 import { uiText } from './localization'
 import { formatEmailTimestamp, messageKey } from './store'
 import { useEmailDateFormat } from './hooks'
+import { emailTabs, revealEmailTab } from './tabs'
 
 export function AccountIcon({ account }: { account: EmailAccount }): React.ReactElement {
   return account.provider === 'google' ? <Google /> : account.provider === 'microsoft' ? <Microsoft /> : <Mail />
@@ -98,7 +99,15 @@ export const MailboxControls: React.FC<{ compact?: boolean }> = ({ compact = fal
   const accountLabel = snap.selectedAccountIds.length === 0 || snap.selectedAccountIds.length === snap.accounts.length ? uiText('email.allAccounts')
     : snap.selectedAccountIds.length === 1 ? account?.displayName || account?.address
       : uiText('email.selectedAccounts', { count: snap.selectedAccountIds.length })
-  return <><div className={`email-mailbox-controls${compact ? ' compact' : ''}`}>
+  // A toolbar button focused by a pointer press shows no focus ring; keyboard focus does (drawn inside the button).
+  const bar = React.useRef<HTMLDivElement | null>(null)
+  const focusSource = (source: 'pointer' | 'keyboard'): void => {
+    for (const button of bar.current?.querySelectorAll<HTMLButtonElement>('button') ?? []) {
+      if (source === 'pointer') button.dataset.focusSource = 'pointer'
+      else delete button.dataset.focusSource
+    }
+  }
+  return <><div ref={bar} className={`email-mailbox-controls${compact ? ' compact' : ''}`} onPointerDownCapture={() => focusSource('pointer')} onKeyDownCapture={() => focusSource('keyboard')}>
     <button className="email-selector email-account-selector" disabled={!account} title={accountLabel || uiText('auto.73e3e6e8e067')}
       aria-label={uiText('auto.73e3e6e8e067')} aria-expanded={expanded === 'accounts'} aria-controls={panelId} onClick={(event) => {
         toggle('accounts', event.currentTarget)
@@ -109,9 +118,10 @@ export const MailboxControls: React.FC<{ compact?: boolean }> = ({ compact = fal
     <button className="email-icon-btn" title={uiText('email.filters')} aria-label={uiText('email.filters')} aria-expanded={expanded === 'filters'} aria-controls={panelId} onClick={event => toggle('filters', event.currentTarget)}><Filter /></button>
     <button className="email-icon-btn email-reload" title={uiText(snap.syncing ? 'email.reloading' : 'email.reload')} aria-label={uiText('email.reload')} aria-busy={snap.syncing} disabled={!account || snap.syncing} onClick={() => { void store.sync() }}><Reload /></button>
     <button className="email-icon-btn email-compose-action" title={uiText('auto.47da6f0838f0')} aria-label={uiText('auto.47da6f0838f0')} disabled={!account} onClick={() => {
-      void store.startCompose().then(() => api.workspace.openMainTab())
+      void store.startCompose().then(revealEmailTab)
     }}><Plus /></button>
   </div>{expanded && <section id={panelId} className="email-inline-options" aria-label={uiText(expanded === 'accounts' ? 'auto.225300411395' : expanded === 'filters' ? 'email.filters' : 'email.mailboxes')}
+    onPointerDownCapture={() => focusSource('pointer')} onKeyDownCapture={() => focusSource('keyboard')}
     onKeyDown={event => {
       if (event.key === 'Escape') { event.stopPropagation(); close(); return }
       if (expanded === 'filters' || !['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return
@@ -179,8 +189,13 @@ export const Panel: React.FC = () => {
             const sender = person ? contactName(person, snap.contacts) : message.from || message.to
             const selected = snap.selectedMessage && messageKey(snap.selectedMessage) === messageKey(message)
             return <SwipeRow key={message.id} message={message} className={selected ? 'active' : ''} onOpen={(event) => {
+              if (api.ui.hasModKey(event)) {
+                emailTabs()?.openNew({ accountIds: [...snap.selectedAccountIds], view: snap.view, folder: snap.selectedFolder, query: snap.query, message: { accountId: message.accountId, folder: message.folder, uid: message.uid } }, message.subject || undefined)
+                if (!message.flags.includes('\\Seen')) void store.act(message, 'mark-read', { wait: true })
+                return
+              }
               store.openMessage(message)
-              api.workspace.openMainTab({ newTab: api.ui.hasModKey(event) })
+              revealEmailTab()
             }}>
               <div className={`email-message-row${message.flags.includes('\\Seen') ? '' : ' unread'}`}>
                 <span className={`email-message-avatar${message.flags.includes('\\Seen') ? '' : ' unread'}`}><ContactAvatar address={person} label={sender} contacts={snap.contacts} /></span>

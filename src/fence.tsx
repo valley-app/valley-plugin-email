@@ -18,6 +18,7 @@ import type { CachedMessage } from './mailTypes'
 import { fenceInt, parseFenceParams } from '@valley/plugin-sdk/fenceParams'
 import { getStore } from './store'
 import { uiText } from './localization'
+import { revealEmailTab } from './tabs'
 
 const STYLE_ID = 'notes-email-fence-styles'
 
@@ -79,7 +80,7 @@ const EmailFence: FC<{ code: string }> = ({ code }) => {
 
   const open = (message: EmailMessageRef | null): void => {
     if (message !== null) store.openMessage(message)
-    api.workspace.openMainTab()
+    revealEmailTab()
   }
 
   if (snap.accounts.length === 0) {
