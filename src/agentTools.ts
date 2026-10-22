@@ -7,7 +7,7 @@ import {
   type AgentToolDefinition,
   type ValleyPluginApi
 } from '@valley/plugin-sdk'
-import type { CachedMessage, EmailAccount } from './mailTypes'
+import type { CachedMessage, EmailAccount, EmailDriver } from './mailTypes'
 
 const schema = (properties: Record<string, unknown>, required: string[] = []) => ({
   type: 'object', properties, required, additionalProperties: false
@@ -18,6 +18,12 @@ const folderArg = text('Mailbox folder path; defaults to INBOX')
 const accountArg = text('Explicit account id returned by list_mail_accounts')
 const uidArg = { type: 'integer', minimum: 1, description: 'Message UID returned by search_email_messages or read_inbox' }
 const json = (value: unknown) => JSON.stringify(value, null, 2)
+// A sent message whose Sent copy failed counts as sent. Any failure that is not a definite refusal may have been delivered, so the error tells the caller not to resend.
+function assertSent(result: Awaited<ReturnType<EmailDriver['sendEmail']>>, failure: string): void {
+  if (result.ok || result.outcome === 'remote-complete') return
+  if (result.outcome === 'not-applied') throw new Error(result.error ?? failure)
+  throw Object.assign(new Error(`${(result.error ?? failure).replace(/\.$/, '')}. ${uiText('email.agentError.uncertain')}`), { outcome: 'unknown' })
+}
 const limitOf = (value: unknown, fallback: number, maximum = 100) =>
   Math.max(1, Math.min(maximum, typeof value === 'number' && Number.isFinite(value) ? Math.trunc(value) : fallback))
 
@@ -226,7 +232,7 @@ function emailToolDefinitions(api: ValleyPluginApi): AgentToolDefinition[] {
           subject: str(args.subject),
           text: str(args.text)
         })
-        if (!result.ok) throw new Error(result.error ?? uiText('email.agentError.send'))
+        assertSent(result, uiText('email.agentError.send'))
         return json({ sent: true, accountId: account.id, to: str(args.to), messageId: result.data?.messageId ?? null })
       }
     },
@@ -248,7 +254,7 @@ function emailToolDefinitions(api: ValleyPluginApi): AgentToolDefinition[] {
           text: body,
           inReplyTo: message.messageId
         })
-        if (!result.ok) throw new Error(result.error ?? uiText('email.agentError.reply'))
+        assertSent(result, uiText('email.agentError.reply'))
         return json({
           sent: true,
           accountId: account.id,
@@ -287,7 +293,7 @@ function emailToolDefinitions(api: ValleyPluginApi): AgentToolDefinition[] {
           subject: subjectWith('Fwd', message.subject),
           text: forwarded
         })
-        if (!result.ok) throw new Error(result.error ?? uiText('email.agentError.forward'))
+        assertSent(result, uiText('email.agentError.forward'))
         return json({
           sent: true,
           accountId: account.id,

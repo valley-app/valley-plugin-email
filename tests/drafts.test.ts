@@ -243,6 +243,49 @@ describe('durable Email drafts', () => {
     expect(restored.datasets.get('email.drafts')).toMatchObject([{ delivery: 'sending' }])
   })
 
+  it('asks before sending a draft again after an uncertain attempt and sends only on explicit confirmation', async () => {
+    const mock = setup([row({ ...draft, pending: { to: '', cc: '', bcc: '' } })], (mock) => {
+      mock.mail.sendEmail = vi.fn().mockResolvedValueOnce({ ok: false, error: 'Socket read timed out', outcome: 'unknown' }).mockResolvedValue({ ok: true })
+    })
+    const confirm = vi.fn().mockResolvedValueOnce('cancel').mockResolvedValueOnce('resend')
+    mock.api.ui.confirm = confirm
+    await mock.store.whenReady
+    expect(await mock.store.send()).toBe(false)
+    expect(mock.store.getSnapshot().error).toContain('Check Sent')
+    expect(confirm).not.toHaveBeenCalled()
+    expect(await mock.store.send()).toBe(false)
+    expect(confirm).toHaveBeenCalledOnce()
+    expect(confirm).toHaveBeenCalledWith(expect.objectContaining({ title: 'Send this draft again?' }))
+    expect(mock.mail.sendEmail).toHaveBeenCalledOnce()
+    expect(mock.datasets.get('email.drafts')).toMatchObject([{ delivery: 'sending' }])
+    expect(await mock.store.send()).toBe(true)
+    expect(mock.mail.sendEmail).toHaveBeenCalledTimes(2)
+    expect(mock.datasets.get('email.drafts')).toEqual([])
+  })
+
+  it('asks before sending a restored draft whose earlier attempt may have completed', async () => {
+    const mock = setup([row({ ...draft, pending: { to: '', cc: '', bcc: '' } }, 'sending')], (mock) => { mock.mail.sendEmail = vi.fn(async () => ({ ok: true })) })
+    mock.api.ui.confirm = vi.fn(async () => 'cancel')
+    await mock.store.whenReady
+    expect(await mock.store.send()).toBe(false)
+    expect(mock.api.ui.confirm).toHaveBeenCalledOnce()
+    expect(mock.mail.sendEmail).not.toHaveBeenCalled()
+  })
+
+  it('clears the send marker after a definite refusal so the next Send needs no confirmation', async () => {
+    const mock = setup([row({ ...draft, pending: { to: '', cc: '', bcc: '' } })], (mock) => {
+      mock.mail.sendEmail = vi.fn().mockResolvedValueOnce({ ok: false, error: '550 no such user', code: 'SEND_FAILED', outcome: 'not-applied' }).mockResolvedValue({ ok: true })
+    })
+    mock.api.ui.confirm = vi.fn(async () => 'cancel')
+    await mock.store.whenReady
+    expect(await mock.store.send()).toBe(false)
+    expect(mock.store.getSnapshot().error).toBe('550 no such user')
+    expect(mock.datasets.get('email.drafts')).toMatchObject([{ delivery: 'editing' }])
+    expect(await mock.store.send()).toBe(true)
+    expect(mock.api.ui.confirm).not.toHaveBeenCalled()
+    expect(mock.mail.sendEmail).toHaveBeenCalledTimes(2)
+  })
+
   it('does not dispatch mail after disposal while the durable marker is pending', async () => {
     const held = deferred()
     const mock = setup([row({ ...draft, pending: { to: '', cc: '', bcc: '' } })], (mock, dataset) => {

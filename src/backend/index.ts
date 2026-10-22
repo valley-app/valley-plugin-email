@@ -4,7 +4,7 @@ import type { PluginDataApi, PluginBackendApi, PluginBackendOperationContext } f
 import type { EmailAccount, CachedMessage } from '../mailTypes'
 import { cacheMailboxes, cachedMailboxes, parseEmailAddresses, queryMessages, readMessage } from './query'
 import { readAccounts as readEmailAccounts, upsertAccount, getAccount as getEmailAccount, removeAccountFiles, readFolder, mergeFolder, establishFolderEpoch, appendMessage, folderCacheStats, updateMessageFlags, moveCachedMessage, emailStoreContext, captureAccountRestore, restoreAccountFiles, forgetCachedMessage, cachedFolderHeaders, pruneFolder, type EmailStoreContext } from './cache'
-import { accountEndpoint, credentialName, MAIL_CREDENTIAL_STORE, verifyImap, verifySmtp, mailDiagnostic, listFolders, fetchFolder, sendMail, applyMessageAction as applyRemoteMessageAction, type MailTransportApi } from './transport'
+import { accountEndpoint, credentialName, MAIL_CREDENTIAL_STORE, verifyImap, verifySmtp, mailDiagnostic, listFolders, fetchFolder, sendMail, MailSendError, applyMessageAction as applyRemoteMessageAction, type MailTransportApi } from './transport'
 import { createMailWorkQueue } from './workQueue'
 import { automationHeaders, MailRefusal, prepareAutomaticMail, type MailAutomationServices } from './automation'
 import { createWorkflowAdapter } from './workflow'
@@ -278,7 +278,9 @@ const methods = {
       let messageId: string
       try { messageId = await sendMail(scope, account, p, automatic) }
       catch (error) {
-        await scope.notifications?.notify('sendFailed', { sourceEventId: attempt, key: `send:${attempt}`, title: scope.t('notification.sendFailed'), body: p.subject, targetItemId: p.accountId, actions: [{ id: 'open', kind: 'open', label: scope.t('notification.open') }] }).catch(() => false)
+        const uncertain = !(error instanceof MailSendError && error.outcome === 'not-applied')
+        if (!uncertain) await automatic?.release().catch(() => undefined)
+        await scope.notifications?.notify('sendFailed', { sourceEventId: attempt, key: `send:${attempt}`, title: scope.t(uncertain ? 'notification.sendUncertain' : 'notification.sendFailed'), body: p.subject, targetItemId: p.accountId, actions: [{ id: 'open', kind: 'open', label: scope.t('notification.open') }] }).catch(() => false)
         throw error
       }
       const sent: CachedMessage = {
@@ -384,8 +386,9 @@ export function register(api: MailBackendApi): () => Promise<void> {
         return method.run(context, input)
       }) }
     } catch (error) {
-      return { ok: false, error: error instanceof Error ? error.message : 'Mail operation failed.',
+      return { ok: false, error: error instanceof Error ? mailDiagnostic(error) : 'Mail operation failed.',
         ...(error instanceof RemoteMailCacheError ? { outcome: 'remote-complete' as const, data: error.result } : {}),
+        ...(error instanceof MailSendError ? { code: error.outcome === 'unknown' ? 'SEND_OUTCOME_UNKNOWN' : 'SEND_FAILED', outcome: error.outcome } : {}),
         ...(error instanceof MailRefusal ? { code: error.code, outcome: error.outcome } : {}) }
     }
   }
@@ -432,7 +435,7 @@ export function register(api: MailBackendApi): () => Promise<void> {
         }
         return true
       } catch (error) {
-        await saveReply({ state: 'unknown', draft })
+        await saveReply({ state: error instanceof MailSendError && error.outcome === 'not-applied' || error instanceof MailRefusal ? 'failed' : 'unknown', draft })
         throw error
       }
     })

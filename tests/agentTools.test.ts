@@ -125,6 +125,17 @@ describe('email assistant tools', () => {
     }))
   })
 
+  it('treats a sent message with a failed Sent copy as sent and warns against resending an uncertain one', async () => {
+    const { email, provider } = setup()
+    const input = { accountId: account.id, to: 'field@example.test', subject: 'Survey', text: 'Ready.' }
+    vi.mocked(email.sendEmail).mockResolvedValueOnce({ ok: false, error: 'Sent cache unavailable', outcome: 'remote-complete', data: { messageId: '<sent@example.test>' } })
+    expect(JSON.parse(String(await provider.execute('compose_email', input)))).toMatchObject({ sent: true, messageId: '<sent@example.test>' })
+    vi.mocked(email.sendEmail).mockResolvedValueOnce({ ok: false, error: 'Socket read timed out', outcome: 'unknown' })
+    await expect(provider.execute('compose_email', input)).rejects.toThrow('Socket read timed out. The send outcome is unknown')
+    vi.mocked(email.sendEmail).mockResolvedValueOnce({ ok: false, error: '550 no such user', outcome: 'not-applied' })
+    await expect(provider.execute('compose_email', input)).rejects.toThrow(/^550 no such user$/)
+  })
+
   it('requires explicit account and folder targets without sending or changing mail during preview', async () => {
     const { mock, email, provider } = setup()
     await expect(provider.execute('update_email_message', { uid: 17, action: 'trash' })).rejects.toThrow('accountId is required')

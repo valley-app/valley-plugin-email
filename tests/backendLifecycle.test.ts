@@ -396,6 +396,44 @@ describe('backend account work ownership', () => {
     expect(cache).toHaveBeenCalledOnce()
   })
 
+  it.each([['not-applied', 'SEND_FAILED', 'Email could not be sent'], ['unknown', 'SEND_OUTCOME_UNKNOWN', 'Email may have been sent']] as const)('reports a %s send with its code, a matching notification and a redacted error', async (outcome, code, title) => {
+    const notify = vi.fn(async () => true)
+    const host = await fixture(['a'], undefined, undefined, { notify } as unknown as MailBackendApi['notifications'])
+    vi.spyOn(transport, 'sendMail').mockRejectedValueOnce(new transport.MailSendError('535 rejected Bearer ya29.secret-token', outcome))
+    const result = await host.call('sendEmail', { accountId: 'a', to: 'reader@example.test', text: 'Hello' }) as { error: string }
+    expect(result).toMatchObject({ ok: false, code, outcome })
+    expect(result.error).not.toContain('ya29.secret-token')
+    expect(notify).toHaveBeenCalledWith('sendFailed', expect.objectContaining({ title }))
+    expect(await readFolder(host.scope, 'a', 'Sent')).toEqual([])
+    await host.dispose()
+  })
+
+  it('redacts credentials from generic operation errors', async () => {
+    const host = await fixture(['a'])
+    vi.spyOn(transport, 'fetchFolder').mockRejectedValueOnce(new Error('LOGIN failed password=hunter2 for https://user:pa55@imap.example.test/'))
+    const result = await host.call('syncFolder', { accountId: 'a' }) as { ok: boolean; error: string }
+    expect(result.ok).toBe(false)
+    expect(result.error).not.toMatch(/hunter2|pa55/)
+    await host.dispose()
+  })
+
+  it.each([['not-applied', 1], ['unknown', 0]] as const)('lets the same automatic send try again only after a %s failure', async (outcome, retries) => {
+    const causal = causationHost()
+    const host = await fixture(['a'], undefined, causal.services)
+    const send = vi.spyOn(transport, 'sendMail').mockRejectedValueOnce(new transport.MailSendError('SMTP failed', outcome)).mockResolvedValue('<retry@example.test>')
+    const input = { accountId: 'a', to: 'reader@example.test', text: 'Hello' }
+    await causal.withCausation(async () => {
+      expect(await host.call('sendEmail', input)).toMatchObject({ ok: false, outcome })
+      const second = await host.call('sendEmail', input)
+      if (retries) expect(second).toMatchObject({ ok: true })
+      else expect(second).toMatchObject({ ok: false, code: 'AUTOMATIC_ALREADY_ACCEPTED', outcome: 'not-applied' })
+    })
+    expect(send).toHaveBeenCalledTimes(1 + retries)
+    const [file] = await host.api.data.files.list('automatic-mail')
+    expect(JSON.parse((await host.api.data.files.readText(`automatic-mail/${file.name}`))!)).toMatchObject({ state: retries ? 'sent' : 'unknown' })
+    await host.dispose()
+  })
+
   it('releases counted input and account locks after failure without replaying an uncertain send', async () => {
     const host = await fixture()
     const held = deferred()

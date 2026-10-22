@@ -42,6 +42,11 @@ export function mailDiagnostic(error: unknown): string {
   return (error instanceof Error ? error.message : String(error)).replace(/[\x00-\x1f\x7f]/g, ' ').replace(/\b(?:Bearer|AUTH\s+(?:PLAIN|XOAUTH2))\s+\S+/gi, '[redacted]').replace(/\b(password|secret|token|api[-_]?key)\s*[:=]\s*\S+/gi, '$1=[redacted]').replace(/(https?:\/\/)[^/\s@]+:[^/\s@]+@/gi, '$1[redacted]@').slice(0, 512)
 }
 
+/** A send failure with a classified outcome: `not-applied` when the server cannot have accepted the message, `unknown` once the end of DATA was written and no definite reply arrived. */
+export class MailSendError extends Error {
+  constructor(message: string, readonly outcome: 'not-applied' | 'unknown') { super(message) }
+}
+
 export function accountEndpoint(account: EmailAccount, kind: 'imap' | 'smtp'): PluginSocketEndpoint {
   const endpoint = account[kind]
   return { host: endpoint.host, port: endpoint.port, security: endpoint.secure ? 'tls' : 'starttls' }
@@ -350,7 +355,7 @@ async function smtpReply(connection: Connection, expected: number[]): Promise<st
     if (!/^\d{3}[ -]/.test(line)) throw new Error(t('email.backend.smtpResponse'))
     lines.push(line)
     if (line[3] === ' ') {
-      if (!expected.includes(Number(line.slice(0, 3)))) throw new Error(mailDiagnostic(line))
+      if (!expected.includes(Number(line.slice(0, 3)))) throw Object.assign(new Error(mailDiagnostic(line)), { smtpReply: true })
       return lines
     }
   }
@@ -381,7 +386,7 @@ export async function verifySmtp(api: MailTransportApi, account: EmailAccount): 
 
 export async function sendMail(api: MailTransportApi, account: EmailAccount, input: EmailSendInput, automatic?: { origin: string; messageId: string }): Promise<string> {
   const recipients = [...parseEmailAddresses(input.to, true), ...parseEmailAddresses(input.cc ?? '', true), ...parseEmailAddresses(input.bcc ?? '', true)]
-  if (!recipients.length) throw new Error(t('email.backend.recipient'))
+  if (!recipients.length) throw new MailSendError(t('email.backend.recipient'), 'not-applied')
   const message = createMimeMessage()
   message.setSender({ addr: account.address, name: account.displayName })
   message.setRecipients(parseEmailAddresses(input.to, true).map((address) => ({ addr: address.address, name: address.name })))
@@ -390,7 +395,7 @@ export async function sendMail(api: MailTransportApi, account: EmailAccount, inp
   const messageId = automatic?.messageId ?? `<${crypto.randomUUID()}@${account.address.split('@')[1]}>`
   message.setHeader('Message-ID', messageId)
   if (automatic) {
-    if (!/^[a-f0-9-]{36}$/i.test(automatic.origin) || !/^<[^<>\s@]+@[^<>\s@]+>$/.test(messageId)) throw new Error(t('email.automatic.invalidProvenance'))
+    if (!/^[a-f0-9-]{36}$/i.test(automatic.origin) || !/^<[^<>\s@]+@[^<>\s@]+>$/.test(messageId)) throw new MailSendError(t('email.automatic.invalidProvenance'), 'not-applied')
     message.setHeader('Auto-Submitted', 'auto-generated')
     message.setHeader('X-Valley-Origin', automatic.origin)
   }
@@ -400,15 +405,21 @@ export async function sendMail(api: MailTransportApi, account: EmailAccount, inp
   }
   message.addMessage({ contentType: 'text/plain', data: input.text ?? '' })
   if (input.html) message.addMessage({ contentType: 'text/html', data: input.html })
-  const connection = new Connection(api, await api.network.open(accountEndpoint(account, 'smtp')))
+  // The server takes responsibility for the message only after the end of DATA. A failure before that leaves nothing sent; after it, only an SMTP reply settles the outcome.
+  let ended = false
+  let connection: Connection | undefined
   try {
+    connection = new Connection(api, await api.network.open(accountEndpoint(account, 'smtp')))
     await initializeSmtp(connection, account)
     await connection.write(`MAIL FROM:<${account.address}>\r\n`); await smtpReply(connection, [250])
     for (const recipient of recipients) { await connection.write(`RCPT TO:<${recipient.address}>\r\n`); await smtpReply(connection, [250, 251]) }
     await connection.write('DATA\r\n'); await smtpReply(connection, [354])
     const raw = encoder.encode(message.asRaw().replace(/\r?\n/g, '\r\n').replace(/^\./gm, '..'))
     for (let offset = 0; offset < raw.length; offset += 32768) await api.network.write(connection.id, encodeBytes(raw.subarray(offset, offset + 32768)))
+    ended = true
     await connection.write('\r\n.\r\n'); await smtpReply(connection, [250])
     return messageId
-  } finally { await connection.close() }
+  } catch (error) {
+    throw new MailSendError(mailDiagnostic(error), ended && !(error as { smtpReply?: boolean }).smtpReply ? 'unknown' : 'not-applied')
+  } finally { await connection?.close() }
 }

@@ -681,7 +681,7 @@ describe('Email mailbox', () => {
     mock.mail.sendEmail = vi.fn(async () => ({ ok: false, error: 'SMTP unavailable' }))
     expect(await store.send()).toBe(false)
     expect(store.getSnapshot().compose?.text).toBe('Biodiversity survey')
-    expect(store.getSnapshot().error).toBe('SMTP unavailable')
+    expect(store.getSnapshot().error).toBe('SMTP unavailable. Sending may have completed. Check Sent before intentionally sending this draft again.')
     mock.api.ui.confirm = vi.fn(async () => 'cancel')
     await store.cancelCompose()
     expect(store.getSnapshot().compose).not.toBeNull()

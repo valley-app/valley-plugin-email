@@ -54,11 +54,12 @@ export async function prepareAutomaticMail(scope: { data: PluginDataApi; service
   }
   const key = await digest(JSON.stringify([causation.rootId, causation.runId, account.id, input]))
   const path = `automatic-mail/${key}.json`
-  if (await scope.data.files.readTextBaseline(path)) throw new MailRefusal('AUTOMATIC_ALREADY_ACCEPTED', t('email.automatic.alreadyAccepted'))
-  if ((await scope.data.files.list('automatic-mail')).length >= 4096) throw new MailRefusal('AUTOMATIC_RECEIPT_LIMIT', t('email.automatic.receiptLimit'))
+  const previous = await scope.data.files.readTextBaseline(path)
+  if (previous && JSON.parse(previous.content).state !== 'not-applied') throw new MailRefusal('AUTOMATIC_ALREADY_ACCEPTED', t('email.automatic.alreadyAccepted'))
+  if (!previous && (await scope.data.files.list('automatic-mail')).length >= 4096) throw new MailRefusal('AUTOMATIC_RECEIPT_LIMIT', t('email.automatic.receiptLimit'))
   const messageId = `<${crypto.randomUUID()}@${account.address.split('@')[1]}>`
   const record = { version: 1, accountId: account.id, messageId, receipt, state: 'unknown', createdAt: new Date().toISOString() }
-  const written = await scope.data.files.writeTextGuarded(path, JSON.stringify(record), null)
+  const written = await scope.data.files.writeTextGuarded(path, JSON.stringify(record), previous?.baseline ?? null)
   if (!written.ok) throw new Error(t('email.automatic.reservationChanged'))
   return {
     origin: receipt, messageId,
@@ -67,6 +68,12 @@ export async function prepareAutomaticMail(scope: { data: PluginDataApi; service
       if (!current || JSON.parse(current.content).messageId !== messageId) throw new Error(t('email.automatic.receiptUnavailable'))
       const saved = await scope.data.files.writeTextGuarded(path, JSON.stringify({ ...record, state: 'sent' }), current.baseline)
       if (!saved.ok) throw new Error(t('email.automatic.outcomeRetain'))
+    },
+    /** Frees the reservation after a send that definitely did not reach the server, so the same run may try again. */
+    async release(): Promise<void> {
+      const current = await scope.data.files.readTextBaseline(path)
+      if (!current || JSON.parse(current.content).messageId !== messageId) return
+      await scope.data.files.writeTextGuarded(path, JSON.stringify({ ...record, state: 'not-applied' }), current.baseline)
     }
   }
 }

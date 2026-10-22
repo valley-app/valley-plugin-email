@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { applyMessageAction, decodeMailbox, encodeMailbox, fetchFolder, listFolders, parseImapResponse, parseMail, sendMail, verifyImap, verifySmtp, type MailTransportApi } from '../src/backend/transport'
+import { applyMessageAction, decodeMailbox, encodeMailbox, fetchFolder, listFolders, MailSendError, parseImapResponse, parseMail, sendMail, verifyImap, verifySmtp, type MailTransportApi } from '../src/backend/transport'
 import type { EmailAccount } from '../src/mailTypes'
 import { decodeBytes, encodeBytes } from '../src/backend/encoding'
 
@@ -174,6 +174,40 @@ describe('package-owned IMAP and SMTP', () => {
     await expect(verifyImap(fixture.api, account)).rejects.toThrow('authentication failed')
     expect(fixture.api.network.close).toHaveBeenCalledTimes(1)
     expect(fixture.writes.join('')).not.toContain('SELECT')
+  })
+
+  const smtpOpen = '220 ready\r\n250 AUTH PLAIN\r\n235 authenticated\r\n'
+  it.each([
+    ['the server is unreachable', '', 'not-applied'],
+    ['a recipient is refused', `${smtpOpen}250 sender\r\n550 no such user\r\n`, 'not-applied'],
+    ['the connection drops while the body is sent', `${smtpOpen}250 sender\r\n250 recipient\r\n354 data\r\n`, 'not-applied'],
+    ['the server refuses the finished message', `${smtpOpen}250 sender\r\n250 recipient\r\n354 data\r\n554 rejected\r\n`, 'not-applied'],
+    ['the connection drops after the end of DATA', `${smtpOpen}250 sender\r\n250 recipient\r\n354 data\r\n`, 'unknown'],
+    ['writing the end of DATA fails', `${smtpOpen}250 sender\r\n250 recipient\r\n354 data\r\n250 accepted\r\n`, 'unknown']
+  ] as const)('classifies a send failure when %s', async (name, replies, outcome) => {
+    const fixture = transport(replies)
+    if (!replies) vi.mocked(fixture.api.network.open).mockRejectedValueOnce(new Error('connect ECONNREFUSED 127.0.0.1:2525'))
+    const write = fixture.api.network.write
+    const failing = name === 'the connection drops while the body is sent' ? 'Hello' : name === 'writing the end of DATA fails' ? '\r\n.\r\n' : undefined
+    if (failing) vi.mocked(write).mockImplementation(async (_id, base64) => {
+      const text = new TextDecoder().decode(decodeBytes(base64))
+      if (text.includes(failing)) throw new Error('socket closed')
+      fixture.writes.push(text)
+    })
+    const sending = sendMail(fixture.api, account, { accountId: account.id, to: 'fern@example.test', subject: 'Canopy', text: 'Hello' })
+    await expect(sending).rejects.toBeInstanceOf(MailSendError)
+    await expect(sending).rejects.toMatchObject({ outcome })
+    expect(fixture.writes.join('').includes('\r\n.\r\n')).toBe(name === 'the connection drops after the end of DATA' || name === 'the server refuses the finished message')
+    if (replies) expect(fixture.api.network.close).toHaveBeenCalledOnce()
+  })
+
+  it('keeps an echoed credential out of a send failure', async () => {
+    const fixture = transport('220 ready\r\n250 AUTH PLAIN\r\n535 AUTH PLAIN AHNlbmRlcgBodW50ZXIy rejected password=hunter2\r\n')
+    const sending = sendMail(fixture.api, account, { accountId: account.id, to: 'fern@example.test', subject: 'Canopy', text: 'Hello' })
+    await expect(sending).rejects.toMatchObject({ outcome: 'not-applied' })
+    const message = await sending.catch((error: Error) => error.message)
+    expect(message).toContain('535')
+    expect(message).not.toMatch(/AHNlbmRlcgBodW50ZXIy|hunter2/)
   })
 
   it('sets automatic headers only from the backend-owned provenance argument', async () => {

@@ -1,6 +1,7 @@
 import type { PluginBackendApi, PluginBackendOperationContext } from '@valley/plugin-sdk'
 import { registerWorkflowContribution, type WorkflowContributionContract, type WorkflowExecutionRequest, type WorkflowContributionRegistrationOptions } from '@valley/plugin-sdk/workflow'
 import config from '../../config.json'
+import { mailDiagnostic } from './transport'
 
 type Handler = (input: unknown, context: PluginBackendOperationContext) => unknown | Promise<unknown>
 type Binding = { method: string; constants?: Record<string, unknown>; inputProperty?: string; result?: string; wrap: boolean; effect: string }
@@ -80,7 +81,7 @@ export async function executeWorkflowOperation(binding: Binding, handler: Handle
   if (binding.result === 'driver') {
     if (!object(value) || value.ok !== true) {
       const unknown = object(value) && (value.outcome === 'unknown' || value.outcome === 'remote-complete') || binding.effect === 'execute' && !(object(value) && value.outcome === 'not-applied')
-      throw Object.assign(new Error(object(value) && typeof value.error === 'string' ? value.error : 'Provider operation failed'), { code: object(value) && typeof value.code === 'string' ? value.code : 'PROVIDER_FAILED', fatal: true, transient: false, retryable: false, ...(unknown ? { outcome: 'unknown', outcomeUnknown: true } : {}) })
+      throw Object.assign(new Error(object(value) && typeof value.error === 'string' ? value.error : 'Provider operation failed'), { code: object(value) && typeof value.code === 'string' ? value.code : 'PROVIDER_FAILED', fatal: true, transient: false, retryable: false, ...(unknown ? { outcome: 'unknown', outcomeUnknown: true } : object(value) && value.outcome === 'not-applied' ? { outcome: 'not-applied', outcomeUnknown: false } : {}) })
     }
     value = value.data ?? null
   } else if (binding.result === 'command') {
@@ -111,6 +112,6 @@ export function createWorkflowAdapter(api: PluginBackendApi, options: WorkflowCo
     if (!binding) throw new Error('Unknown registered Workflow block')
     return executeWorkflowOperation(binding, (input, scoped) => run(binding.method, input, scoped), request, context)
   }, options)
-  void contribution.ready.catch(error => api.rpc.emit?.('workflow.registrationFailed', { message: error instanceof Error ? error.message : String(error) }))
+  void contribution.ready.catch(error => api.rpc.emit?.('workflow.registrationFailed', { message: mailDiagnostic(error) }))
   return { operation, local, run, ready: contribution.ready, dispose: contribution.dispose, emit: contribution.emit }
 }

@@ -26,6 +26,7 @@ export function createDraftRepository(api: ValleyPluginApi, retained: RetainedDr
   let desired: StoredDraft | null | undefined
   let pending: Promise<void> | undefined
   let failure: { error: unknown } | undefined
+  let released: number | undefined
   const loaded = dataset.read(key).then(result => {
     const parsed = result.value === null ? null : recordSchema.safeParse(result.value)
     if (parsed && !parsed.success) throw new Error(uiText('email.draftInvalid'))
@@ -43,7 +44,7 @@ export function createDraftRepository(api: ValleyPluginApi, retained: RetainedDr
     while (desired !== undefined) {
       const next = desired
       desired = undefined
-      if (next && stored?.draft.id === next.draft.id && stored.delivery === 'sending') next.delivery = 'sending'
+      if (next && stored?.draft.id === next.draft.id && stored.delivery === 'sending' && released !== next.draft.id) next.delivery = 'sending'
       if (JSON.stringify(next) === JSON.stringify(stored)) continue
       try {
         const options = { operationId: crypto.randomUUID(), expected: [{ dataset: `${api.pluginId}.drafts`, key, revision: revision! }] }
@@ -79,11 +80,25 @@ export function createDraftRepository(api: ValleyPluginApi, retained: RetainedDr
     loaded,
     block(error: unknown): void { failure = { error } },
     holds(draft: ComposeDraft): boolean { return (desired !== undefined ? desired : stored)?.draft.id === draft.id },
+    /** True while an earlier send of this draft may have reached the server. */
+    uncertain(draft: ComposeDraft): boolean {
+      const record = desired !== undefined ? desired : stored
+      return record?.draft.id === draft.id && record.delivery === 'sending'
+    },
+    /** Clears the send marker after the server definitely did not accept the message. */
+    release(draft: ComposeDraft): Promise<void> {
+      const record = desired !== undefined ? desired : stored
+      if (record?.draft.id !== draft.id || record.delivery !== 'sending') return flush()
+      released = draft.id
+      desired = { ...record, delivery: 'editing' }
+      return flush()
+    },
     save(draft: ComposeDraft, sending = false): Promise<void> {
+      if (sending) released = undefined
       const previous = desired ?? stored
       const value = draftSchema.parse(draft)
       if (value.inReplyTo === undefined) delete value.inReplyTo
-      desired = { id: 'compose', draft: value, delivery: sending || previous?.draft.id === draft.id && previous.delivery === 'sending' ? 'sending' : 'editing' }
+      desired = { id: 'compose', draft: value, delivery: sending || previous?.draft.id === draft.id && previous.delivery === 'sending' && released !== draft.id ? 'sending' : 'editing' }
       return flush()
     },
     async clear(draft: ComposeDraft): Promise<boolean> {

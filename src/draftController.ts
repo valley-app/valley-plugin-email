@@ -195,13 +195,26 @@ export function createDraftController(api: ValleyPluginApi, ports: DraftPorts, r
     pendingSend = sendDraft(draft)
     return pendingSend
   }
+  async function confirmResend(): Promise<boolean> {
+    return await Promise.race([revoked, api.ui.confirm({ title: uiText('email.resendTitle'), message: uiText('email.resendMessage'), actions: [
+      { label: uiText('auto.77dfd2135f4d'), value: 'cancel', variant: 'ghost' },
+      { label: uiText('email.resend'), value: 'resend', variant: 'danger' }
+    ] })]) === 'resend'
+  }
   async function sendDraft(draft: ComposeDraft): Promise<boolean> {
     try {
+      await repository.flush()
+      if (repository.uncertain(draft) && !(await confirmResend())) return false
+      if (!current()) return false
       await repository.save(draft, true)
       if (!current()) return false
       const result = await dispatch(() => mail.sendEmail({ accountId: draft.accountId, to: formatAddresses(draft.to), cc: formatAddresses(draft.cc),
         bcc: formatAddresses(draft.bcc), subject: draft.subject, text: draft.text, inReplyTo: draft.inReplyTo }))
-      if (!result.ok && result.outcome !== 'remote-complete') throw new Error(result.error || uiText('email.sendFailed'))
+      if (!result.ok && result.outcome === 'not-applied') {
+        await repository.release(draft)
+        throw new Error(result.error || uiText('email.sendFailed'))
+      }
+      if (!result.ok && result.outcome !== 'remote-complete') throw new Error([result.error?.replace(/\.?$/, '.'), uiText('email.draftUncertain')].filter(Boolean).join(' '))
       try {
         if (await repository.clear(draft)) {
           ports.sent(draft)

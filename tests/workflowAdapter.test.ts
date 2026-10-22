@@ -54,4 +54,5 @@ it('retains uncertain accepted effects and never marks fatal failures retryable'
   const request = { nodeTypeId: 'selected', parameters: {}, items: [] }
   await expect(executeWorkflowOperation({ method: 'owner.method', result: 'driver', wrap: false, effect: 'execute' }, async () => ({ ok: false, error: 'Receipt was not saved', outcome: 'remote-complete' }), request, context)).rejects.toMatchObject({ outcomeUnknown: true, fatal: true, transient: false, retryable: false })
   expect(await executeWorkflowOperation({ method: 'owner.method', wrap: true, effect: 'read' }, async () => false, request, context)).toEqual({ items: [{ json: { value: false } }] })
+  await expect(executeWorkflowOperation({ method: 'owner.method', result: 'driver', wrap: false, effect: 'execute' }, async () => ({ ok: false, error: 'Automatic reply blocked', code: 'AUTOMATIC_EMAIL_LOOP', outcome: 'not-applied' }), request, context)).rejects.toMatchObject({ code: 'AUTOMATIC_EMAIL_LOOP', outcome: 'not-applied', outcomeUnknown: false, retryable: false })
 })
