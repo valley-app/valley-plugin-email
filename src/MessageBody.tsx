@@ -1,7 +1,7 @@
 import { normalizeLinkPreferences, parseLinkUrl, recognizeLinkValue } from '@valley/plugin-sdk/linkTargets'
 import DOMPurify from 'dompurify'
 import type { EmailMessageDetail } from './mailTypes'
-import { api, React } from './runtime'
+import { api, opensInNewTab, React } from './runtime'
 import { uiText } from './localization'
 import { useEmailDisplaySettings } from './hooks'
 
@@ -83,8 +83,9 @@ function PlainBody({ value }: { value: string }) {
     const link = recognizeLinkValue(value.slice(from), api.getState().dateFormat)
     if (!link || !preferences[link.target.category].recognize) continue
     parts.push(value.slice(copied, from), <span key={from} role="link" tabIndex={0} style={{ cursor: 'pointer', textDecoration: 'underline' }}
-      onClick={event => { if (!event.shiftKey && !event.altKey && event.currentTarget.ownerDocument.getSelection()?.isCollapsed !== false) void api.links.open(link.target) }}
-      onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey && !event.altKey) { event.preventDefault(); void api.links.open(link.target) } }}
+      onClick={event => { if (!event.shiftKey && !event.altKey && event.currentTarget.ownerDocument.getSelection()?.isCollapsed !== false) void api.links.open(link.target, { newTab: opensInNewTab(event) }) }}
+      onAuxClick={event => { if (event.button === 1 && !event.shiftKey && !event.altKey) { event.preventDefault(); void api.links.open(link.target, { newTab: true }) } }}
+      onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey && !event.altKey) { event.preventDefault(); void api.links.open(link.target, { newTab: opensInNewTab(event) }) } }}
     >{value.slice(from, from + link.length)}</span>)
     copied = from + link.length
   }
@@ -99,6 +100,6 @@ export const MessageBody: React.FC<{ message: EmailMessageDetail; plain?: boolea
   const content = React.useMemo(() => message.html && !plain ? emailDocument(message.html, remoteImages) : null, [message.html, plain, remoteImages])
   return <div className="email-body-content">
     {content && !plain && content.blockedImages && <div className="email-body-options"><span>{uiText('email.imagesBlocked')}</span></div>}
-    {content && !plain ? <api.ui.HtmlContent html={content.document} title={uiText('email.htmlBody')} remoteImages={remoteImages} onLink={(url) => { void api.files.openExternalUrl(url) }} /> : <PlainBody value={message.text || message.snippet || uiText('auto.d141aa8bcb1f')} />}
+    {content && !plain ? <api.ui.HtmlContent html={content.document} title={uiText('email.htmlBody')} remoteImages={remoteImages} onLink={(url, options) => { void api.files.openExternalUrl(url, options) }} /> : <PlainBody value={message.text || message.snippet || uiText('auto.d141aa8bcb1f')} />}
   </div>
 }

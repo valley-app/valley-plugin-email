@@ -1,6 +1,6 @@
 import { CONTACTS_DIRECTORY_V1, type ContactDirectoryEntry } from '@valley/plugin-sdk'
 import type { EmailAddress } from './mailTypes'
-import { React, api } from './runtime'
+import { React, api, opensInNewTab } from './runtime'
 import { useEmail } from './hooks'
 import { uiText } from './localization'
 
@@ -35,7 +35,12 @@ export const Person: React.FC<{ address: EmailAddress; showAddress?: boolean }> 
     if (!provider) return
     void api.ui.openPopover(({ close }) => <div className="email-contact-card">
       <div className="email-popover-label">{address.address}</div>
-      {matches.map((contact) => <button key={contact.id} className="email-account-option" onClick={() => {
+      {matches.map((contact) => <button key={contact.id} className="email-account-option" onClick={(event) => {
+        close()
+        void provider.invoke('open', [contact.id, { newTab: opensInNewTab(event) }])
+      }} onAuxClick={(event) => {
+        if (event.button !== 1) return
+        event.preventDefault()
         close()
         void provider.invoke('open', [contact.id, { newTab: true }])
       }}>

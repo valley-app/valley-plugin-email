@@ -1,6 +1,6 @@
 import { EmailFilterControls, ClassificationStatus, useSmartGroups } from './Organization'
 import { descendantIds, findGroupPath, flattenGroups } from './smartGroups'
-import { React, api } from './runtime'
+import { React, api, opensInNewTab } from './runtime'
 import type { EmailAccount, EmailMailbox } from './mailTypes'
 import type { EmailMailboxView } from './mailTypes'
 import { useEmail } from './hooks'
@@ -276,7 +276,7 @@ export const Panel: React.FC = () => {
             const sender = person ? contactName(person, snap.contacts) : message.from || message.to
             const selected = snap.selectedMessage && messageKey(snap.selectedMessage) === messageKey(message)
             return <SwipeRow key={message.id} message={message} className={selected ? 'active' : ''} onOpen={(event) => {
-              if (api.ui.hasModKey(event)) {
+              if (opensInNewTab(event)) {
                 emailTabs()?.openNew({ accountIds: [...snap.selectedAccountIds], view: snap.view, folder: snap.selectedFolder, query: snap.query, message: { accountId: message.accountId, folder: message.folder, uid: message.uid } }, message.subject || undefined)
                 if (!message.flags.includes('\\Seen')) void store.act(message, 'mark-read', { wait: true })
                 return

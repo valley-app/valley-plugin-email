@@ -114,6 +114,7 @@ export const SwipeRow: React.FC<{
         move(gesture.offset > 0 ? Math.max(0, Math.min(OPEN, value)) : gesture.offset < 0 ? Math.min(0, Math.max(-OPEN, value)) : Math.max(-OPEN, Math.min(OPEN, value)))
       }} onPointerUp={(event) => end(event)} onPointerCancel={(event) => end(event, true)}
       onClick={(event) => { if (suppressClick.current) return; if (offsetRef.current) close(); else onOpen(event) }}
+      onAuxClick={(event) => { if (event.button !== 1 || suppressClick.current || offsetRef.current) return; event.preventDefault(); onOpen(event) }}
       onKeyDown={(event) => {
         delete event.currentTarget.dataset.focusSource
         if (event.key === 'Escape') { event.preventDefault(); close() }

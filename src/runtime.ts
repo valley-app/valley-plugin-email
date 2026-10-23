@@ -12,3 +12,5 @@ export function initRuntime(a: ValleyPluginApi): void {
   api = a
   React = a.React
 }
+
+export const opensInNewTab = (event: { metaKey: boolean; ctrlKey: boolean; button?: number }): boolean => api.ui.hasModKey(event) || event.button === 1

@@ -11,6 +11,7 @@ import { Preview } from '../src/Preview'
 import { emailDisplaySettingsKey } from '../src/hooks'
 import { disposeStore, formatEmailTimestamp, getStore } from '../src/store'
 import { emailDocument, MessageBody } from '../src/MessageBody'
+import { Person } from '../src/People'
 
 const message: EmailMessageDetail = {
   id: 'canopy', accountId: 'one', folder: 'INBOX', uid: 7, messageId: '<canopy@example.com>',
@@ -1236,5 +1237,81 @@ describe('Email message actions', () => {
     const css = [...document.querySelectorAll('style')].map((style) => style.textContent).join('\n')
     expect(css).toContain('.email-swipe-content[data-focus-source="pointer"]:focus-visible { outline:none; }')
     expect(css).toContain('.email-swipe-content:focus-visible { outline:2px solid var(--accent-color); outline-offset:-2px; }')
+  })
+})
+
+describe('plain click opens in the same tab, Mod or middle click in a new tab', () => {
+  const auxClick = (element: Element) => fireEvent(element, new MouseEvent('auxclick', { bubbles: true, cancelable: true, button: 1 }))
+
+  it('passes the intent with a plain-text link click, Mod-click, middle click and Enter', async () => {
+    const mock = setup()
+    await getStore().whenReady
+    const open = vi.mocked(mock.api.links.open)
+    open.mockClear()
+    render(<MessageBody message={{ ...message, text: 'Census notes at https://example.com/survey today.' }} plain />)
+    const link = screen.getByRole('link', { name: 'https://example.com/survey' })
+    fireEvent.click(link)
+    fireEvent.click(link, { metaKey: true })
+    auxClick(link)
+    fireEvent.keyDown(link, { key: 'Enter' })
+    fireEvent.keyDown(link, { key: 'Enter', metaKey: true })
+    fireEvent.click(link, { shiftKey: true })
+    expect(open.mock.calls.map(([target, options]) => [(target as { value: string }).value, options])).toEqual([
+      ['https://example.com/survey', { newTab: false }],
+      ['https://example.com/survey', { newTab: true }],
+      ['https://example.com/survey', { newTab: true }],
+      ['https://example.com/survey', { newTab: false }],
+      ['https://example.com/survey', { newTab: true }]
+    ])
+  })
+
+  it('forwards the host intent of an HTML link to the external URL route', async () => {
+    const mock = setup()
+    await getStore().whenReady
+    let onLink: ((url: string, options: { newTab: boolean }) => void) | undefined
+    mock.api.ui.HtmlContent = (props) => { onLink = props.onLink; return null }
+    const external = vi.spyOn(mock.api.files, 'openExternalUrl')
+    render(<MessageBody message={{ ...message, html: '<a href="https://example.com/survey">Survey</a>' }} plain={false} />)
+    onLink!('https://example.com/survey', { newTab: false })
+    onLink!('https://example.com/survey', { newTab: true })
+    expect(external.mock.calls).toEqual([['https://example.com/survey', { newTab: false }], ['https://example.com/survey', { newTab: true }]])
+  })
+
+  it('opens a message row in a new tab on middle click and in place on a plain click', async () => {
+    const mock = setup()
+    const { container } = render(<Panel />)
+    await waitFor(() => expect(container.querySelector('.email-swipe-content')).not.toBeNull())
+    const openMainTab = vi.spyOn(mock.api.workspace, 'openMainTab')
+    await act(async () => { auxClick(container.querySelector('.email-swipe-content')!) })
+    expect(openMainTab).toHaveBeenCalledTimes(1)
+    expect(openMainTab.mock.calls[0][0]).toMatchObject({ newTab: true })
+    await waitFor(() => expect(mock.mail.applyMessageAction).toHaveBeenCalledWith({ accountId: 'one', folder: 'INBOX', uid: 7, action: 'mark-read' }))
+    openMainTab.mockClear()
+    await act(async () => { fireEvent.click(container.querySelector('.email-swipe-content')!) })
+    await waitFor(() => expect(getStore().getSnapshot().loadingMessage).toBe(false))
+    expect(openMainTab.mock.calls.every(([options]) => !options?.newTab)).toBe(true)
+  })
+
+  it('opens a matched contact in the same tab on a plain click and in a new tab on Mod or middle click', async () => {
+    const mock = setup()
+    const opened: unknown[][] = []
+    mock.provideInterop(CONTACTS_DIRECTORY_V1, {
+      search: async () => [],
+      resolveEmails: async (addresses) => addresses.map((address) => ({ address, contacts: [{ id: 'canopy-contact', displayName: 'Canopy Research', emails: [{ address }] }] })),
+      open: async (...args) => { opened.push(args) }
+    }, 'contacts')
+    render(<><Panel /><Person address={{ name: '', address: 'canopy@example.com' }} /></>)
+    const person = await screen.findByRole('button', { name: 'Canopy Research' })
+    const choose = (click: (option: Element) => void) => {
+      fireEvent.click(person)
+      const { unmount } = render(<>{mock.popovers.at(-1)!.node}</>)
+      click(document.querySelector('.email-contact-card .email-account-option')!)
+      unmount()
+    }
+    choose((option) => fireEvent.click(option))
+    choose((option) => fireEvent.click(option, { metaKey: true }))
+    choose((option) => auxClick(option))
+    await waitFor(() => expect(opened).toHaveLength(3))
+    expect(opened).toEqual([['canopy-contact', { newTab: false }], ['canopy-contact', { newTab: true }], ['canopy-contact', { newTab: true }]])
   })
 })
